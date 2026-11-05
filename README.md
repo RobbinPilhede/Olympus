@@ -35,9 +35,12 @@ If you pay for more than one AI coding tool, you end up juggling terminals, acco
 
 **You need:** Windows 10 or 11 (x64) with an AVX2 CPU, plus at least one of [Claude Code](https://www.anthropic.com/claude-code) or [Codex](https://github.com/openai/codex), signed in.
 
-1. Download `olympus.exe` from the [latest release](https://github.com/RobbinPilhede/Olympus/releases/latest).
-2. Run it in a project folder, or run `olympus <folder>`. The builds aren't code-signed yet, so Windows may show a SmartScreen warning.
-3. Press **+ New**, pick an account, pick a folder, and start typing.
+1. Download [`OlympusSetup.exe`](https://github.com/RobbinPilhede/Olympus/releases/latest/download/OlympusSetup.exe) and run it. It takes one click, needs no admin rights, and adds Olympus to your Start menu and Desktop. The builds aren't code-signed yet, so Windows may show a SmartScreen warning.
+2. Press **+ New**, pick an account, pick a folder, and start typing.
+
+**Updates are automatic.** Each time you open Olympus, it plays a short animation while it checks for a new version. If there is one, it downloads it, verifies its checksum, swaps it in and reopens, and you can skip it while it downloads. If you're offline, it just opens. Anything already running keeps working on the old copy until you close it.
+
+**To uninstall,** use Windows's Installed apps. Your threads and settings stay in `~/.olympus`, so delete that folder too if you want them gone.
 
 > [!WARNING]
 > Chats run with permissions **bypassed** by default, so agents can edit files and run commands without asking. Read [Safety and secrets](#safety-and-secrets) first.
@@ -191,6 +194,7 @@ Your data stays in `~/.olympus`: settings, saved threads, `learn.db`, usage and 
 - **Agents run with permissions bypassed.** They can change or delete files and run commands without asking. Point them at folders you can recover, ideally under version control.
 - **Change the node token.** A node accepts the default token `olympus` unless you set `OLYMPUS_NODE_TOKEN`. Its firewall rule only allows your local subnet, but anyone on that network who knows the default can use the node.
 - **Global hotkeys.** Shift+V and Shift+C use a low-level keyboard hook. `/hotkeys off` turns it off.
+- **Automatic updates.** The installed app downloads new versions from this repo's releases over HTTPS and checks each one's SHA-256. The releases aren't code-signed, so you're trusting this GitHub repo. Builds you make yourself, and an `olympus.exe` run from outside the install folder, never update themselves.
 - **Your accounts, your terms.** Each provider's terms apply to how you use your subscriptions and models. Olympus isn't affiliated with Anthropic or OpenAI.
 
 ## Build from source
@@ -208,7 +212,7 @@ cd Olympus
 cargo build --release
 ```
 
-The binaries land in `target\release`, and build files go in `C:\ot` to stay under Windows's path length limit. A first build is slow.
+The binaries land in `target\release`, and build files go in `C:\ot` to stay under Windows's path length limit. A first build is slow. `scripts\release.ps1` builds and publishes the version named in `Cargo.toml`.
 
 ```powershell
 cargo clippy --workspace --all-targets

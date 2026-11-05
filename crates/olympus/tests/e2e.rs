@@ -242,6 +242,52 @@ fn a_real_terminal_window_opens_and_keeps_the_app_responsive() {
     assert!(app.wait_for_exit().success());
 }
 
+fn wait_until(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting: {what}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn setup_installs_for_this_user_and_uninstall_removes_it_but_keeps_your_data() {
+    let root = tempfile::tempdir().expect("root");
+    let (home, local, roaming) = (root.path().join("home"), root.path().join("local"), root.path().join("roaming"));
+    for folder in [&home, &local, &roaming] {
+        std::fs::create_dir_all(folder).expect("folder");
+    }
+    let sandbox = |command: &mut Command| {
+        command.env("USERPROFILE", &home).env("HOME", &home).env("LOCALAPPDATA", &local).env("APPDATA", &roaming);
+    };
+    let setup = root.path().join("OlympusSetup.exe");
+    std::fs::copy(EXE, &setup).expect("copy");
+    let mut command = Command::new(&setup);
+    sandbox(&mut command);
+    let mut running = command.spawn().expect("setup");
+
+    let dir = local.join("Programs").join("Olympus");
+    let installed = dir.join("olympus.exe");
+    let shortcut = roaming.join(r"Microsoft\Windows\Start Menu\Programs\Olympus.lnk");
+    wait_until("the shortcut", || shortcut.is_file());
+    assert!(running.wait().expect("setup exits").success());
+    assert!(installed.is_file());
+    let version = Command::new(&installed).arg("--version").output().expect("version");
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("olympus "));
+
+    // Setup opened the installed copy, and this path only exists inside this test's folder.
+    let script = format!("Get-Process olympus -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{}' }} | Stop-Process -Force", installed.display());
+    Command::new("powershell.exe").args(["-NoProfile", "-Command", &script]).status().expect("stop the installed copy");
+
+    let mut command = Command::new(&installed);
+    command.arg("--uninstall");
+    sandbox(&mut command);
+    assert!(command.status().expect("uninstall").success());
+    wait_until("the app folder to go", || !dir.exists());
+    assert!(!shortcut.exists());
+    assert!(home.join(".olympus").exists(), "your data stays");
+}
+
 #[test]
 fn command_line_flags_print_and_bad_folders_explain_themselves() {
     let version = Command::new(EXE).arg("--version").output().expect("version");

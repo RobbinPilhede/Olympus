@@ -3,6 +3,7 @@ mod composer_view;
 mod overlay;
 pub mod parts;
 mod review;
+mod splash;
 mod terminal;
 mod transcript;
 
@@ -12,6 +13,7 @@ use crate::input::{KeyCode, KeyEvent, KeyModifiers};
 use crate::markdown::{Inline, Tone};
 use crate::session::{Pane, Window as OWindow};
 use crate::theme;
+use crate::update::Job;
 use gpui::prelude::*;
 use gpui::{
     canvas, div, font, px, size, Animation, AnimationExt as _, AnyElement, App as GApp, Application, Bounds, ClipboardItem, Context, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Font,
@@ -118,12 +120,15 @@ impl gpui::AssetSource for Assets {
             LOGO => Some(Cow::Borrowed(include_bytes!("../../assets/icon/olympus.svg").as_slice())),
             CLAUDE_MARK => Some(Cow::Borrowed(include_bytes!("../../assets/icon/claude.svg").as_slice())),
             OPENAI_MARK => Some(Cow::Borrowed(include_bytes!("../../assets/icon/openai.svg").as_slice())),
+            splash::PEAK_LEFT => Some(Cow::Borrowed(include_bytes!("../../assets/icon/peak-left.svg").as_slice())),
+            splash::PEAK_RIGHT => Some(Cow::Borrowed(include_bytes!("../../assets/icon/peak-right.svg").as_slice())),
+            splash::BOLT => Some(Cow::Borrowed(include_bytes!("../../assets/icon/bolt.svg").as_slice())),
             _ => None,
         })
     }
 
     fn list(&self, _: &str) -> gpui::Result<Vec<SharedString>> {
-        Ok(vec![LOGO.into(), CLAUDE_MARK.into(), OPENAI_MARK.into()])
+        Ok(vec![LOGO.into(), CLAUDE_MARK.into(), OPENAI_MARK.into(), splash::PEAK_LEFT.into(), splash::PEAK_RIGHT.into(), splash::BOLT.into()])
     }
 }
 
@@ -141,8 +146,23 @@ fn system_prefers_reduced_motion() -> bool {
     read.is_ok() && !enabled.as_bool()
 }
 
-/// Opens the window and runs until the user quits.
-pub fn run(rt: Arc<Runtime>, cwd: PathBuf) {
+fn open_app(rt: Arc<Runtime>, cwd: PathBuf, welcome: Option<String>, cx: &mut GApp) {
+    let options = WindowOptions {
+        titlebar: Some(TitlebarOptions { title: Some("Olympus".into()), appears_transparent: true, traffic_light_position: None }),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1320.), px(840.)), cx))),
+        window_min_size: Some(size(px(560.), px(380.))),
+        app_id: Some("olympus".into()),
+        ..WindowOptions::default()
+    };
+    let handle = cx.open_window(options, |window, cx| cx.new(|cx| Root::new(rt, cwd, window, cx))).expect("opening the window");
+    if let Some(text) = welcome {
+        let _ = handle.update(cx, |root, _, cx| root.flash_for(&text, Duration::from_secs(5), cx));
+    }
+    cx.activate(true);
+}
+
+/// Opens the splash if `job` is set, then the window, and runs until the user quits.
+pub fn run(load: impl FnOnce() -> anyhow::Result<Arc<Runtime>> + 'static, cwd: PathBuf, job: Option<Job>, welcome: Option<String>) {
     Application::new().with_assets(Assets).run(move |cx: &mut GApp| {
         let fonts: Vec<Cow<'static, [u8]>> = vec![
             Cow::Borrowed(include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf")),
@@ -151,15 +171,17 @@ pub fn run(rt: Arc<Runtime>, cwd: PathBuf) {
             Cow::Borrowed(include_bytes!("../../assets/fonts/JetBrainsMono-Italic.ttf")),
         ];
         cx.text_system().add_fonts(fonts).expect("the bundled fonts are valid");
-        let options = WindowOptions {
-            titlebar: Some(TitlebarOptions { title: Some("Olympus".into()), appears_transparent: true, traffic_light_position: None }),
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1320.), px(840.)), cx))),
-            window_min_size: Some(size(px(560.), px(380.))),
-            app_id: Some("olympus".into()),
-            ..WindowOptions::default()
+        let open = move |cx: &mut GApp| match load() {
+            Ok(rt) => open_app(rt, cwd, welcome, cx),
+            Err(error) => {
+                crate::show_fatal(&format!("Olympus couldn't start.\n\n{error:#}"));
+                std::process::exit(1);
+            }
         };
-        cx.open_window(options, |window, cx| cx.new(|cx| Root::new(rt, cwd, window, cx))).expect("opening the window");
-        cx.activate(true);
+        match job {
+            Some(job) => splash::open(job, system_prefers_reduced_motion() || std::env::var_os("OLYMPUS_REDUCE_MOTION").is_some(), cx, open),
+            None => open(cx),
+        }
     });
 }
 

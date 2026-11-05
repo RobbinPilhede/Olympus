@@ -26,6 +26,7 @@ The owner runs this on their own PC and network, and accessibility is not a conc
 | `crates/olympus/src/voice.rs`, `pill.rs` | Dictation (cpal, whisper-rs on Vulkan) and its floating pill |
 | `crates/olympus/src/capture.rs` | Screenshot overlay with pencil and its toolbar (pure `Shot` and `Toolbar` logic, GDI drawing), clipboard files, attachments |
 | `crates/olympus/src/notify.rs` | Finish chime and Windows notifications |
+| `crates/olympus/src/update.rs`, `gui/splash.rs` | Installer, uninstaller, self-update, and the launch animation |
 | `crates/olympus-core/src/agent.rs`, `claude.rs`, `codex.rs`, `openai.rs`, `node.rs` | One turn on each provider |
 | `crates/olympus-core/src/runtime.rs`, `target.rs`, `limits.rs`, `discovery.rs` | Routing, model targets, quotas, finding CLIs, accounts and past sessions |
 | `crates/olympus-core/src/workflow.rs`, `git.rs`, `roles.rs` | `/auto`, `/council`, `/review` |
@@ -62,6 +63,13 @@ Traps, all handled by `.cargo/config.toml`, so don't "clean them up":
 - `CMAKE_*_FLAGS_RELEASE` restores `/O2` and AVX. Without them dictation is about 50 times slower.
 - The config finds CMake, libclang and the Vulkan SDK at `.tools\cmake`, `.tools\libclang` and `.tools\vulkan`, and real environment variables override it. On the owner's PC those are junctions into `~/.olympus/tools`. The node's shader compiler is `.tools\glslc`. `.tools` is git-ignored.
 - A first build is slow. Run it in the background.
+
+## Install, updates and releases
+
+- An exe with `setup` in its name installs itself. Only a copy in `%LOCALAPPDATA%\Programs\Olympus` shows the splash and updates itself. A build in `target\release` never does, so an update can't overwrite your work.
+- To release: bump `version` in the root `Cargo.toml`, commit, then run `scripts\release.ps1`. Installed copies update to it through the release's `latest.json`. Don't change that file's name or format, because copies already out there read it.
+- The script builds with `CARGO_HOME=C:\ot\cargo` and refuses to publish a binary containing your user folder's path.
+- Test windows with a temporary `USERPROFILE` skip the registry and the real Desktop on purpose (`in_real_profile`).
 
 ## Check your work
 

@@ -15,6 +15,7 @@ mod pill;
 mod pty;
 mod session;
 mod theme;
+mod update;
 mod voice;
 
 use anyhow::Result;
@@ -45,7 +46,15 @@ fn open_window(folder: Option<PathBuf>) -> Result<()> {
     let launched = std::env::current_dir().unwrap_or_else(|_| user_home());
     // Double-clicking the exe starts in its own folder, which is never the project.
     let cwd = folder.unwrap_or(if Some(&launched) == exe_dir.as_ref() { user_home() } else { launched });
-    gui::run(Arc::new(Runtime::load()?), cwd);
+    let exe = std::env::current_exe()?;
+    // Agents inherit this environment, and a relaunch only announces itself once.
+    let welcome = std::env::var(update::WELCOME_VAR).ok();
+    std::env::remove_var(update::WELCOME_VAR);
+    let job = welcome.is_none().then(|| update::job_for(&exe, &update::install_dir())).flatten();
+    // Finding the CLIs takes a moment, and the splash shouldn't wait for it.
+    let loading = tokio.spawn_blocking(|| Runtime::load().map(Arc::new));
+    let handle = tokio.handle().clone();
+    gui::run(move || handle.block_on(loading)?, cwd, job, welcome);
     Ok(())
 }
 
@@ -65,9 +74,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("--help" | "-h") => {
-            println!("Olympus {}\n\n  olympus          Open Olympus here\n  olympus <folder> Open Olympus in a folder\n  olympus mcp      Serve the model bridge over stdio (agents start this themselves)", env!("CARGO_PKG_VERSION"));
+            println!("Olympus {}\n\n  olympus             Open Olympus here\n  olympus <folder>    Open Olympus in a folder\n  olympus mcp         Serve the model bridge over stdio (agents start this themselves)\n  olympus --uninstall Remove the installed app and keep your data", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        Some("--uninstall") => update::uninstall(),
         Some(other) if !PathBuf::from(other).is_dir() => {
             eprintln!("{other} isn't a folder. Run olympus --help.");
             std::process::exit(2);
