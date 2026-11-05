@@ -137,6 +137,18 @@ pub struct IngestStats {
     pub bytes: u64,
 }
 
+/// One past message found by `Store::search_messages`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageHit {
+    pub vendor: String,
+    pub session: String,
+    pub cwd: String,
+    pub timestamp: String,
+    pub role: String,
+    pub text: String,
+    pub snippet: String,
+}
+
 /// One prompt found by `Store::search_history`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryHit {

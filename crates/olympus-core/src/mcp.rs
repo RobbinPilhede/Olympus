@@ -19,7 +19,7 @@ fn tool_list() -> Value {
          "inputSchema": {"type": "object", "properties": {"prompt": {"type": "string"}, "models": {"type": "array", "items": {"type": "string"}, "description": "Defaults to one strong model per vendor."}}, "required": ["prompt"]}},
         {"name": "recall", "description": "Search lessons learned from this user's past work.",
          "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
-        {"name": "search_history", "description": "Search what this user asked for in past Claude Code and Codex sessions.",
+        {"name": "search_history", "description": "Full-text search of what was said in this user's past Claude Code and Codex sessions, both their messages and the replies.",
          "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
         {"name": "list_skills", "description": "Find installed skills by keyword. Returns names and descriptions.",
          "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}},
@@ -70,8 +70,8 @@ async fn call_tool(rt: Arc<Runtime>, name: &str, args: &Value) -> Result<String,
             let query = args["query"].as_str().ok_or("search_history needs 'query'.")?;
             let store = rt.learn.clone().ok_or("The learning store isn't available.")?;
             let store = store.lock().map_err(|_| "The learning store is unavailable.")?;
-            let hits = store.search_history(query, 8).map_err(|e| e.to_string())?;
-            Ok(if hits.is_empty() { "Nothing in history matches.".into() } else { hits.iter().map(|h| format!("- [{}] {}", h.timestamp, h.snippet)).collect::<Vec<_>>().join("\n") })
+            let hits = store.search_messages(query, 8).map_err(|e| e.to_string())?;
+            Ok(if hits.is_empty() { "Nothing in history matches.".into() } else { hits.iter().map(|h| format!("- [{} {} in {}] {}", h.timestamp, h.role, h.cwd, h.snippet)).collect::<Vec<_>>().join("\n") })
         }
         "list_skills" => {
             let all = skills::installed(&skills::default_roots(&user_home()));

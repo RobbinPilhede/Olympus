@@ -111,6 +111,9 @@ async fn search(args: &Value, cwd: &Path) -> Result<String, String> {
 
 async fn shell(args: &Value, cwd: &Path) -> Result<String, String> {
     let command = str_arg(args, "command")?;
+    if let Some(reason) = crate::guard::blocked(command) {
+        return Err(format!("Olympus blocked this command because {reason}. Tell the user what you wanted to run, so they can decide and run it themselves."));
+    }
     let timeout = args["timeout_secs"].as_u64().unwrap_or(120).min(1800);
     let (code, output) = run_shell(command, cwd, Duration::from_secs(timeout)).await?;
     Ok(format!("exit {code}\n{}", clip(&output, MAX_OUTPUT)))
@@ -133,6 +136,15 @@ pub async fn run_shell(command: &str, cwd: &Path, timeout: Duration) -> Result<(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn the_shell_tool_refuses_a_blocked_command_without_running_it() {
+        let dir = tempfile::tempdir().expect("dir");
+        let phrase = crate::guard::TEST_PHRASE;
+        let refused = super::execute("shell", &serde_json::json!({"command": format!("Set-Content proof.txt {phrase}")}), dir.path(), false).await.expect_err("refused");
+        assert!(refused.contains("blocked"), "{refused}");
+        assert!(!dir.path().join("proof.txt").exists());
+    }
+
     use super::*;
 
     #[test]

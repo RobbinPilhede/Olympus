@@ -114,6 +114,26 @@ CREATE TABLE route_stats(
     beta REAL NOT NULL,
     PRIMARY KEY(task_class, repo, model)
 ) WITHOUT ROWID;
+"#, r#"
+CREATE TABLE messages(
+    id INTEGER PRIMARY KEY,
+    vendor TEXT NOT NULL,
+    session TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    role TEXT NOT NULL,
+    text TEXT NOT NULL
+);
+CREATE VIRTUAL TABLE messages_fts USING fts5(
+    text, content='messages', content_rowid='id', tokenize='porter unicode61'
+);
+CREATE TABLE message_files(
+    path TEXT PRIMARY KEY,
+    byte_offset INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    session TEXT NOT NULL,
+    cwd TEXT NOT NULL
+) WITHOUT ROWID;
 "#];
 
 pub(crate) fn migrate(conn: &Connection) -> Result<()> {

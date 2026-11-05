@@ -22,7 +22,7 @@ pub use text::is_correction;
 pub use math::{fnv1a64, weighted_tokens};
 pub use types::{
     HistoryHit, HoldoutReport, IngestProgress, IngestStats, Injection, LearnStats, Lesson,
-    LessonKind, LessonState, ModelTokens, NewLesson, RateLimit, RunRecord, SignalCount,
+    LessonKind, LessonState, MessageHit, ModelTokens, NewLesson, RateLimit, RunRecord, SignalCount,
 };
 
 /// SQLite-backed learning store in WAL mode.

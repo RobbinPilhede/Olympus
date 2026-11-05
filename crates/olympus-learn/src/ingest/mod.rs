@@ -2,6 +2,7 @@ mod claude;
 mod codex;
 mod derive;
 mod lines;
+mod messages;
 mod sink;
 mod tracker;
 
@@ -99,7 +100,7 @@ fn dump_state<T: Serialize>(state: &T) -> Result<String> {
 }
 
 impl Store {
-    /// Incrementally ingests transcripts, storing only extracted signals and truncated prompts.
+    /// Incrementally ingests transcripts: signals, truncated prompts, and redacted messages for search.
     pub fn ingest(
         &self,
         claude_dir: Option<&Path>,
@@ -130,6 +131,7 @@ impl Store {
         if stats.files_updated > 0 {
             stats.candidates = self.derive_candidates()?;
         }
+        self.index_messages(claude_dir, codex_dir)?;
         Ok(stats)
     }
 

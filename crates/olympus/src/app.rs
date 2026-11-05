@@ -118,6 +118,12 @@ pub enum AppEvent {
     AccountAdded,
     Notify { window: u64, ok: bool, body: String },
     DiffLoaded { window: u64, source: DiffSource, outcome: Result<Vec<FileDiff>, String> },
+    /// Time to see whether a schedule is due.
+    ScheduleTick,
+    /// A message from your linked Telegram chat, or a pairing attempt.
+    Phone { chat: i64, text: String },
+    /// A bot token checked out, so the connection can start.
+    PhoneChecked { token: String, bot: Option<String> },
     Wake,
 }
 
@@ -158,6 +164,10 @@ pub struct App {
     pub provider_lines: Vec<(String, bool)>,
     pub node: Option<(String, String)>,
     pub sessions_dir: PathBuf,
+    pub schedules: Vec<crate::schedule::Schedule>,
+    pub phone: Option<crate::telegram::Phone>,
+    /// Lets the phone connection transcribe voice memos; set once the interface starts it.
+    pub voice: Option<crate::voice::Voice>,
     pub quit: bool,
     pub quit_armed: bool,
     next_id: u64,
@@ -197,6 +207,9 @@ impl App {
             reduce_motion: std::env::var_os("OLYMPUS_REDUCE_MOTION").is_some(),
             provider_lines,
             node: None,
+            schedules: crate::schedule::load(&sessions_dir.with_file_name(commands::SCHEDULES_FILE)),
+            phone: None,
+            voice: None,
             sessions_dir,
             quit: false,
             quit_armed: false,
@@ -605,6 +618,8 @@ impl App {
                 _ => format!("Failed: {}", result.error.as_deref().and_then(|e| e.lines().next()).unwrap_or("the turn stopped")),
             };
             self.notify(id, result.stop == Stop::Completed, body);
+            self.report_to_phone(id, &result);
+            self.offer_skill(id, &result);
         }
         if let Some((next, prompt)) = failover {
             if let Some(chat) = self.window_mut(id).and_then(Window::chat) {
@@ -617,6 +632,31 @@ impl App {
             self.start_turn(id, prompt);
         } else if let Some(text) = queued {
             self.send(id, text);
+        }
+    }
+
+    fn report_to_phone(&mut self, id: u64, result: &TurnResult) {
+        let Some(chat) = self.window_mut(id).and_then(Window::chat) else { return };
+        if !std::mem::take(&mut chat.reply_to_phone) {
+            return;
+        }
+        let title = chat.state.title.clone();
+        let body = match result.stop {
+            Stop::Completed if result.text.trim().is_empty() => "Finished.".to_string(),
+            Stop::Completed => result.text.clone(),
+            Stop::Cancelled => "Stopped.".to_string(),
+            _ => format!("Failed: {}", result.error.as_deref().unwrap_or("the turn stopped")),
+        };
+        if let Some(phone) = &self.phone {
+            phone.say(format!("{title}\n\n{body}"));
+        }
+    }
+
+    fn offer_skill(&mut self, id: u64, result: &TurnResult) {
+        let Some(chat) = self.window_mut(id).and_then(Window::chat) else { return };
+        let steps = chat.steps_in_last_turn();
+        if result.stop == Stop::Completed && steps >= commands::STEPS_WORTH_SAVING {
+            chat.push(Block::Note(format!("That took {steps} steps. Run /save-skill to keep how it was done, and you can review it before it's used.")));
         }
     }
 
@@ -759,6 +799,9 @@ impl App {
                 self.status.clear();
                 self.pending_flash = Some("Signed in. Click the account line on any thread to use it there.".into());
             }
+            AppEvent::ScheduleTick => commands::run_due_schedules(self),
+            AppEvent::Phone { chat, text } => commands::phone_message(self, chat, &text),
+            AppEvent::PhoneChecked { token, bot } => commands::finish_phone_connect(self, token, bot),
             AppEvent::Wake => {}
         }
     }

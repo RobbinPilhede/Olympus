@@ -7,6 +7,7 @@ pub mod config;
 pub mod discovery;
 pub mod event;
 pub mod git;
+pub mod guard;
 pub mod limits;
 pub mod mcp;
 pub mod node;

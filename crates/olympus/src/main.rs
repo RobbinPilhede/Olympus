@@ -13,7 +13,9 @@ mod markdown;
 mod notify;
 mod pill;
 mod pty;
+mod schedule;
 mod session;
+mod telegram;
 mod theme;
 mod update;
 mod voice;
@@ -78,6 +80,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("--uninstall") => update::uninstall(),
+        Some("guard") => std::process::exit(olympus_core::guard::run_hook()),
         Some(other) if !PathBuf::from(other).is_dir() => {
             eprintln!("{other} isn't a folder. Run olympus --help.");
             std::process::exit(2);

@@ -18,6 +18,7 @@ const SILENCE_RMS: f32 = 0.002;
 enum Command {
     Start { locked: bool },
     Stop,
+    Clip { audio: Vec<f32>, reply: tokio::sync::oneshot::Sender<Result<String, String>> },
 }
 
 /// Records while a key is held, then types what was said wherever the cursor is.
@@ -35,6 +36,13 @@ impl Voice {
     /// Stops recording and transcribes.
     pub fn stop(&self) {
         let _ = self.commands.send(Command::Stop);
+    }
+
+    /// Transcribes a recording made elsewhere, from 16 kHz mono samples.
+    pub async fn transcribe_clip(&self, audio: Vec<f32>) -> Result<String, String> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.commands.send(Command::Clip { audio, reply }).map_err(|_| "Voice isn't available right now.")?;
+        answer.await.map_err(|_| "Voice isn't available right now.")?
     }
 }
 
@@ -230,10 +238,33 @@ pub fn spawn() -> Voice {
                     crate::notify::tick(false);
                     finish(finished, &engine, &pill);
                 }
+                Command::Clip { audio, reply } => {
+                    let _ = reply.send(transcribe_clip(&audio, &engine));
+                }
             }
         }
     });
     Voice { commands }
+}
+
+fn transcribe_clip(audio: &[f32], engine: &Mutex<Option<WhisperContext>>) -> Result<String, String> {
+    if rms(audio) < SILENCE_RMS {
+        return Err("That recording was silent.".into());
+    }
+    let mut slot = engine.lock().map_err(|_| "Voice isn't available right now.")?;
+    if slot.is_none() {
+        let path = model_path();
+        if !path.exists() && !download_model(&path) {
+            return Err("Unable to download the voice model.".into());
+        }
+        *slot = load_engine(&path);
+    }
+    let loaded = slot.as_ref().ok_or("Unable to load the voice model.")?;
+    let text = transcribe(loaded, audio).map(|text| clean_transcript(&text)).unwrap_or_default();
+    if text.is_empty() {
+        return Err("I couldn't make out any words in that recording.".into());
+    }
+    Ok(text)
 }
 
 fn finish(finished: Recording, engine: &Mutex<Option<WhisperContext>>, pill: &Pill) {

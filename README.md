@@ -29,7 +29,8 @@ If you pay for more than one AI coding tool, you end up juggling terminals, acco
 - **They work together.** Ask a second opinion mid-chat, have several models debate a decision, or let one build while another reviews.
 - **It feels like a CLI.** GPU-drawn with [GPUI](https://gpui.rs), driven from the keyboard, and everything is one `Alt+K` away.
 - **It spends fewer tokens.** Lean startup, on-demand skills and cheapest-first routing.
-- **It learns from you.** Your past corrections become lessons, and nothing is used until you approve it.
+- **It learns from you.** Your past corrections become lessons and finished tasks can become skills, and nothing is used until you approve it.
+- **It reaches your phone.** Text your own Telegram bot or send it a voice memo, and get the result back when the work is done.
 
 ## Get started
 
@@ -77,6 +78,28 @@ flowchart LR
     O <--> L[(learn.db: lessons and routing)]
 ```
 
+### Reach it from your phone
+
+Text your own Telegram bot or send it a voice memo, and Olympus replies when the work is done. Olympus has to be open on your PC. It only makes outgoing connections, so nothing on your PC is exposed to the internet, and voice memos are transcribed on your own GPU.
+
+1. In Telegram, message [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token it gives you.
+2. In Olympus, run `/telegram connect <token>`.
+3. Send your bot the code Olympus shows. Only that chat can reach Olympus from then on. Everyone else gets silence, and pairing closes after five wrong codes.
+
+In Telegram, `/threads` lists your threads, `/use 2` switches to one, `/new` starts one, `/stop` stops the current work, and `/schedules` lists your schedules. Agents still run with permissions bypassed, so treat your Telegram account as a key to your PC.
+
+### Run things on a timetable
+
+`/schedule daily 08:00 summarize my calendar` or `/schedule every 1h check the deploy` keeps running after a restart, and sends the result to your phone if Telegram is connected. Schedules run while Olympus is open. A run missed while it's closed happens once at the next launch. Each run starts a fresh conversation in that thread, so a daily job doesn't pay for its earlier runs.
+
+### Find anything you've talked about
+
+`/search rate limiting` searches everything said in your past Claude and Codex chats, and picking a result reopens that session. Agents can search it too, through the `search_history` tool. Chats on OpenRouter and network models aren't indexed yet.
+
+### Keep what worked as a skill
+
+After a task that took eight or more steps, Olympus offers to save how it was done. `/save-skill` has a model write a draft and shows it to you. Nothing is used until you approve it with `/keep-skill <name>`, which installs it to `~/.claude/skills` and never replaces a skill you already have. `/drop-skill <name>` deletes a draft.
+
 ### Run models on your own hardware
 
 Drag `olympus-node.exe` onto another PC on your network and run it. It serves models from Hugging Face, and Olympus finds it automatically. Use `/nodes` to find one, `/hf qwen3` to download a model, and `/load` to load one you already have.
@@ -95,7 +118,7 @@ Hold **Shift+V** to dictate into whatever app you're using. It runs on your GPU,
 
 ### Learn from your history
 
-- History from `~/.claude` and `~/.codex`, including compressed archives, is read into `~/.olympus/learn.db` in the background. Only signals and short prompts are stored.
+- History from `~/.claude` and `~/.codex`, including compressed archives, is read into `~/.olympus/learn.db` in the background. It stores signals, short prompts, and your messages and the replies for search (up to 4,000 characters each), with anything that looks like a key removed. Tool output isn't stored. The file stays on your PC.
 - `/learn distill` asks a model to find lasting rules in your corrections. Nothing is used until you `/approve` it.
 - Lessons that lead to failures or corrections lose standing and retire on their own. Lessons tied to a file go stale when that file changes.
 - `/auto` tasks count as successes only if their checks pass. Chat turns count against a model if your next message corrects it.
@@ -117,6 +140,10 @@ Everything is reachable from `Alt+K`.
 | `/sessions` | Reopens any past Claude or Codex session |
 | `/simplify`, `/code-review`, `/my-skill ...` | Runs any installed skill or Claude Code command. On Claude it's the real command, with your full setup for that message. On ChatGPT, nodes and OpenRouter, skills are sent as instructions |
 | `/loop 5m check the deploy`, `/loop run tests every 1h`, `/loop stop` | Repeats a message or skill in this thread while Olympus is open. Without a time, the model decides how long to wait. A failed run or `/stop` ends it |
+| `/schedule daily 08:00 <message>`, `/schedule every 1h <message>`, `/schedule list`, `/schedule stop 1` | Runs a message or skill on a timetable that survives restarts. It reports in this thread and on your phone |
+| `/search <words>` | Finds words in your past Claude and Codex chats, and reopens the session you pick |
+| `/save-skill [name]`, `/keep-skill <name>`, `/drop-skill <name>` | Drafts a skill from this chat, then approves or deletes the draft |
+| `/telegram connect <token>`, `/telegram`, `/telegram off` | Connects your own Telegram bot, shows its status, or disconnects and deletes its token |
 | `/remember always use pnpm` | Teaches Olympus directly |
 | `/usage` | Quotas, spend, and whether memory is actually helping |
 
@@ -183,6 +210,7 @@ Keys are never stored in this repo or in the app. Set them in your environment:
 | `OPENROUTER_API_KEY` | OpenRouter models (or set `openrouter_key` in `config.toml`) |
 | `HF_TOKEN` | Gated Hugging Face models on a node |
 | `OLYMPUS_NODE_TOKEN` | The token a node requires. Set the same value as `node_token` in `config.toml` |
+| `OLYMPUS_TELEGRAM_TOKEN` | Your Telegram bot's token, instead of the one `/telegram connect` saves in `~/.olympus/telegram.json` |
 
 Your data stays in `~/.olympus`: settings, saved threads, `learn.db`, usage and attachments.
 
@@ -192,7 +220,9 @@ Your data stays in `~/.olympus`: settings, saved threads, `learn.db`, usage and 
 > Olympus is built for one person on their own PC and trusted network. Read this before you use it anywhere else.
 
 - **Agents run with permissions bypassed.** They can change or delete files and run commands without asking. Point them at folders you can recover, ideally under version control.
+- **There's a small block list, not a sandbox.** Before a chat's shell command runs on Claude, Codex, OpenRouter or a node, Olympus refuses the most catastrophic ones: recursively deleting system, home or credentials folders, wiping or formatting a disk, damaging Windows or its backups, and force-pushing over `main`. It catches accidents, not a model determined to get around it. It doesn't cover `/claude`, `/codex`, `/term` or Self-improve windows, or file edits. If a command you really want is refused, run it yourself in a terminal.
 - **Change the node token.** A node accepts the default token `olympus` unless you set `OLYMPUS_NODE_TOKEN`. Its firewall rule only allows your local subnet, but anyone on that network who knows the default can use the node.
+- **Your Telegram account can run commands on your PC** once it's linked. Keep your bot token private, and use `/telegram off` if you lose your phone.
 - **Global hotkeys.** Shift+V and Shift+C use a low-level keyboard hook. `/hotkeys off` turns it off.
 - **Automatic updates.** The installed app downloads new versions from this repo's releases over HTTPS and checks each one's SHA-256. The releases aren't code-signed, so you're trusting this GitHub repo. Builds you make yourself, and an `olympus.exe` run from outside the install folder, never update themselves.
 - **Your accounts, your terms.** Each provider's terms apply to how you use your subscriptions and models. Olympus isn't affiliated with Anthropic or OpenAI.

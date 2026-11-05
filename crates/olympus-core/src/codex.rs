@@ -149,7 +149,8 @@ impl Parser {
             Some("mcp_tool_call") => emit(AgentEvent::ToolEnd { id, ok: item["status"] != "failed", summary: String::new() }),
             Some("web_search") => emit(AgentEvent::ToolEnd { id, ok: true, summary: String::new() }),
             Some("error") => {
-                if let Some(message) = item["message"].as_str() {
+                // Codex warns about the flag Olympus's own block list needs, on every turn.
+                if let Some(message) = item["message"].as_str().filter(|message| !message.contains("bypass-hook-trust")) {
                     emit(AgentEvent::Status(message.chars().take(200).collect()));
                 }
             }
@@ -159,11 +160,13 @@ impl Parser {
 }
 
 /// Runs one Codex turn through the official signed-in binary.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     exe: &Path,
     req: &TurnRequest,
     system: &str,
     mcp_exe: Option<&Path>,
+    guard_exe: &Path,
     idle: Duration,
     cancel: Cancel,
     emit: &mut (dyn FnMut(AgentEvent) + Send),
@@ -181,7 +184,12 @@ pub async fn run(
         None => None,
     };
     let mut cmd = Command::new(exe);
-    cmd.args(build_args(req, schema_file.as_deref(), mcp_exe)).current_dir(&req.cwd);
+    let mut args = build_args(req, schema_file.as_deref(), mcp_exe);
+    if req.access == Access::Full {
+        // Olympus writes this hook itself just now, so there's nothing for Codex's trust prompt to vet.
+        args.splice(1..1, ["--dangerously-bypass-hook-trust".to_string(), "-c".to_string(), crate::guard::codex_setting(guard_exe)]);
+    }
+    cmd.args(args).current_dir(&req.cwd);
     scrub_env(&mut cmd);
     cmd.env("OLYMPUS_DEPTH", req.depth.to_string());
     if let Some(dir) = &req.account_dir {
@@ -254,6 +262,12 @@ mod tests {
         assert_eq!(args[resume + 1], "abc");
         assert_eq!(args.last().map(String::as_str), Some("-"));
         assert!(args.iter().position(|a| a == "--json").expect("json") < resume);
+    }
+
+    #[test]
+    fn the_block_lists_trust_warning_stays_out_of_the_chat() {
+        let (_, events) = feed(&[r#"{"type":"item.completed","item":{"id":"i","type":"error","message":"`--dangerously-bypass-hook-trust` is enabled."}}"#, r#"{"type":"item.completed","item":{"id":"j","type":"error","message":"a real problem"}}"#]);
+        assert_eq!(events.len(), 1, "{events:?}");
     }
 
     #[test]

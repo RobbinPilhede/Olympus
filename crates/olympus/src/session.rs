@@ -158,6 +158,8 @@ pub struct Chat {
     pub last_prompt: String,
     pub failed_over: bool,
     pub looping: Option<Loop>,
+    /// The finished result also goes to your phone.
+    pub reply_to_phone: bool,
     /// Set when the view should return to the newest message.
     pub follow: bool,
     /// The first block changed since the interface last looked.
@@ -174,7 +176,7 @@ impl Chat {
 
     /// Rebuilds a chat from saved state.
     pub fn restore(state: ChatState, file_id: String) -> Self {
-        Self { state, pending_run: None, queue: VecDeque::new(), cancel: None, last_prompt: String::new(), failed_over: false, looping: None, follow: false, dirty_from: Some(0), file_id }
+        Self { state, pending_run: None, queue: VecDeque::new(), cancel: None, last_prompt: String::new(), failed_over: false, looping: None, reply_to_phone: false, follow: false, dirty_from: Some(0), file_id }
     }
 
     /// True until a message or `/rename` gives the chat a topic; older chats were titled after their folder.
@@ -228,6 +230,11 @@ impl Chat {
             AgentEvent::Status(text) => self.push(Block::Note(text)),
             AgentEvent::Limit(_) => {}
         }
+    }
+
+    /// How many tools the latest message took, which is what makes a task worth saving as a skill.
+    pub fn steps_in_last_turn(&self) -> usize {
+        self.state.blocks.iter().rev().take_while(|block| !matches!(block, Block::User(_))).filter(|block| matches!(block, Block::Tool { .. })).count()
     }
 
     /// Replaces the final assistant text with the authoritative result when streaming missed it.

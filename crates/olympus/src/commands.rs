@@ -171,6 +171,375 @@ fn parse_loop(args: &str) -> (Option<Duration>, String) {
     (None, args.to_string())
 }
 
+// A repeating job needs a real message or skill, never one of Olympus's own commands.
+fn repeatable(app: &App, prompt: &str, what: &str) -> Result<(), String> {
+    if prompt.starts_with('/') {
+        let name = prompt.split_whitespace().next().unwrap_or_default();
+        if COMMANDS.iter().any(|c| c.name == name) || !is_passed_on(name, &app.current_cwd()) {
+            return Err(format!("{what} repeats a message or a skill, not {name}."));
+        }
+    }
+    Ok(())
+}
+
+/// The saved jobs, beside the threads folder.
+pub const SCHEDULES_FILE: &str = "schedules.json";
+const TELEGRAM_FILE: &str = "telegram.json";
+/// A task that took at least this many tools gets an offer to save it as a skill.
+pub const STEPS_WORTH_SAVING: usize = 8;
+const USAGE_SCHEDULE: &str = "Say when and what, like /schedule daily 08:00 summarize my calendar, or /schedule every 1h check the deploy. Use /schedule list to see them.";
+
+fn parse_schedule(args: &str) -> Option<(crate::schedule::When, String)> {
+    use crate::schedule::{parse_time, When};
+    let mut parts = args.trim().splitn(3, char::is_whitespace);
+    let (kind, timing, prompt) = (parts.next()?, parts.next()?, parts.next()?.trim());
+    let when = match kind {
+        "every" => When::Every { seconds: parse_duration(timing)?.max(SHORTEST_LOOP).as_secs() },
+        "daily" => parse_time(timing).map(|(hour, minute)| When::Daily { hour, minute })?,
+        _ => return None,
+    };
+    (!prompt.is_empty()).then(|| (when, prompt.to_string()))
+}
+
+fn save_schedules(app: &mut App) {
+    let path = app.sessions_dir.with_file_name(SCHEDULES_FILE);
+    if let Err(error) = crate::schedule::save(&path, &app.schedules) {
+        app.fail_active(format!("Unable to save your schedules: {error}"));
+    }
+}
+
+fn schedule_list(app: &App) -> String {
+    if app.schedules.is_empty() {
+        return "No schedules yet. Try /schedule daily 08:00 summarize my calendar.".to_string();
+    }
+    app.schedules.iter().map(|job| format!("{}. {}: {}", job.id, job.when.label(), job.prompt)).collect::<Vec<_>>().join("\n")
+}
+
+fn schedule_command(app: &mut App, args: &str) {
+    let args = args.trim();
+    if args.is_empty() || args == "list" {
+        let list = schedule_list(app);
+        app.note_active(list);
+        return;
+    }
+    if let Some(number) = args.strip_prefix("stop") {
+        let before = app.schedules.len();
+        let number = number.trim().parse::<u64>().ok();
+        app.schedules.retain(|job| Some(job.id) != number);
+        if app.schedules.len() == before {
+            app.fail_active("Give the schedule's number, from /schedule list.");
+            return;
+        }
+        save_schedules(app);
+        app.note_active("Schedule stopped.");
+        return;
+    }
+    let Some((when, prompt)) = parse_schedule(args) else {
+        app.fail_active(USAGE_SCHEDULE);
+        return;
+    };
+    if let Err(problem) = repeatable(app, &prompt, "/schedule") {
+        app.fail_active(problem);
+        return;
+    }
+    let Some(chat) = app.chat() else {
+        app.fail_active("Open a chat to start a schedule. It reports in that chat.");
+        return;
+    };
+    let job = crate::schedule::Schedule { id: 0, when, prompt, thread: chat.file_id.clone(), cwd: chat.state.cwd.clone(), account_dir: chat.state.account_dir.clone(), codex_account_dir: chat.state.codex_account_dir.clone(), choice: chat.state.choice.clone(), last_run: chrono::Local::now().timestamp() };
+    let label = job.when.label();
+    let id = app.schedules.iter().map(|existing| existing.id).max().unwrap_or(0) + 1;
+    app.schedules.push(crate::schedule::Schedule { id, ..job });
+    save_schedules(app);
+    let delivery = if app.phone.is_some() { " Results also go to your phone." } else { "" };
+    app.note_active(format!("Scheduled {label}. It reports here while Olympus is open, and a run missed while it's closed happens at the next launch.{delivery}"));
+}
+
+/// Wakes the schedules every half minute, starting just after launch.
+pub fn start_schedule_clock(tx: tokio::sync::mpsc::UnboundedSender<AppEvent>) {
+    tokio::spawn(async move {
+        let mut clock = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            clock.tick().await;
+            if tx.send(AppEvent::ScheduleTick).is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// Starts any schedule that's due.
+pub fn run_due_schedules(app: &mut App) {
+    let now = chrono::Local::now();
+    let due: Vec<usize> = app.schedules.iter().enumerate().filter(|(_, job)| crate::schedule::is_due(&job.when, job.last_run, &now)).map(|(index, _)| index).collect();
+    for index in &due {
+        run_schedule(app, *index, now.timestamp());
+    }
+    if !due.is_empty() {
+        save_schedules(app);
+    }
+}
+
+fn run_schedule(app: &mut App, index: usize, now: i64) {
+    let job = app.schedules[index].clone();
+    let found = app.windows.iter().find(|window| matches!(&window.pane, Pane::Chat(chat) if chat.file_id == job.thread)).map(|window| window.id);
+    let id = found.unwrap_or_else(|| {
+        // Its thread was closed. It gets a new one without taking the focus from what you're doing.
+        let focused = app.active;
+        let id = app.new_chat(job.cwd.clone());
+        app.active = focused;
+        id
+    });
+    let Some(chat) = app.window_mut(id).and_then(crate::session::Window::chat) else { return };
+    chat.state.account_dir.clone_from(&job.account_dir);
+    chat.state.codex_account_dir.clone_from(&job.codex_account_dir);
+    chat.state.choice = job.choice.clone();
+    // Each run starts fresh, so a daily job doesn't pay for all of its earlier runs.
+    chat.state.vendor_session = None;
+    chat.reply_to_phone = true;
+    let thread = chat.file_id.clone();
+    app.schedules[index].thread = thread;
+    app.schedules[index].last_run = now;
+    app.send(id, job.prompt);
+}
+
+fn search(app: &mut App, args: &str) {
+    if args.trim().is_empty() {
+        app.fail_active("Say what to look for, like /search rate limiting.");
+        return;
+    }
+    let (tx, id, query) = (app.tx.clone(), app.active_id(), args.trim().to_string());
+    app.picker = Some(Picker::loading("Search"));
+    tokio::task::spawn_blocking(move || {
+        let hits = Store::open(&home_dir().join("learn.db")).and_then(|store| store.search_messages(&query, 30));
+        match hits {
+            Ok(hits) => {
+                let items = hits
+                    .into_iter()
+                    .map(|hit| {
+                        let cwd = PathBuf::from(&hit.cwd);
+                        let folder = cwd.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+                        let date: String = hit.timestamp.chars().take(10).collect();
+                        let title = crate::session::short_title(hit.text.lines().next().unwrap_or("Past chat"));
+                        PickItem { label: hit.snippet.replace('\n', " "), detail: format!("{} · {folder} · {date}", hit.vendor), action: Action::Resume { vendor: hit.vendor, id: hit.session, cwd, title } }
+                    })
+                    .collect();
+                let _ = tx.send(AppEvent::Picker(Picker::new("Search", items, "Nothing matches that. Chats since you opened Olympus are added the next time it starts.")));
+            }
+            Err(error) => {
+                let _ = tx.send(AppEvent::Picker(Picker::new("Search", Vec::new(), "Search isn't available.")));
+                let _ = tx.send(AppEvent::Fail { window: id, text: format!("{error:#}") });
+            }
+        }
+    });
+}
+
+fn save_skill(app: &mut App, args: &str) {
+    let wanted = args.trim().to_string();
+    if !wanted.is_empty() && skills::clean_skill_name(&wanted).is_none() {
+        app.fail_active("Use a short name with letters and numbers, like /save-skill fix-flaky-tests.");
+        return;
+    }
+    let transcript = app.chat().map(|chat| chat.handoff(40_000)).unwrap_or_default();
+    if transcript.trim().is_empty() {
+        app.fail_active("There's nothing in this chat to learn from yet.");
+        return;
+    }
+    let Some((id, cwd, cancel)) = begin_background(app) else { return };
+    let (rt, tx) = (app.rt.clone(), app.tx.clone());
+    tokio::spawn(async move {
+        let drafted = async {
+            let target = rt.pick(olympus_core::runtime::Tier::Standard, "write a skill", &cwd).await?;
+            let mut req = olympus_core::agent::TurnRequest::new(target, skills::draft_prompt(&transcript), cwd);
+            req.access = olympus_core::agent::Access::ReadOnly;
+            req.ephemeral = true;
+            req.use_memory = false;
+            let result = olympus_core::agent::run_turn(&rt, &req, cancel, &mut |_| {}).await;
+            if !result.ok() {
+                return Err(result.error.unwrap_or_else(|| "The model failed.".to_string()));
+            }
+            let (name, contents) = skills::parse_draft(&result.text, (!wanted.is_empty()).then_some(wanted.as_str()))?;
+            skills::save_draft(&home_dir(), &name, &contents).map_err(|error| format!("Unable to save the draft: {error}"))?;
+            Ok::<_, String>((name, contents))
+        };
+        let event = match drafted.await {
+            Ok((name, contents)) => AppEvent::Answer { window: id, label: "Skill draft".into(), text: format!("{contents}\n\nThis isn't used yet. Run `/keep-skill {name}` to approve it, or `/drop-skill {name}` to delete it.") },
+            Err(text) => AppEvent::Fail { window: id, text },
+        };
+        let _ = tx.send(event);
+        let _ = tx.send(AppEvent::Done { window: id });
+    });
+}
+
+fn keep_skill(app: &mut App, args: &str) {
+    match skills::keep_draft(&home_dir(), &user_home(), args) {
+        Ok(path) => {
+            app.skill_hints = skill_hints(&app.current_cwd());
+            app.note_active(format!("Skill saved to {}. It's available from your next message.", path.display()));
+        }
+        Err(problem) => app.fail_active(problem),
+    }
+}
+
+/// Reconnects at launch if a bot was set up before.
+pub fn resume_phone(app: &mut App) {
+    let path = app.sessions_dir.with_file_name(TELEGRAM_FILE);
+    let Some(settings) = crate::telegram::load(&path) else { return };
+    let (voice, tx) = (app.voice.clone(), app.tx.clone());
+    let base = crate::telegram::api_base(&settings.token);
+    app.phone = Some(crate::telegram::Phone::start(base, settings, path, voice, tx));
+}
+
+fn telegram_command(app: &mut App, args: &str) {
+    let path = app.sessions_dir.with_file_name(TELEGRAM_FILE);
+    let args = args.trim();
+    if args == "off" {
+        app.phone = None;
+        match std::fs::remove_file(&path) {
+            Ok(()) => app.note_active("Telegram is off, and the bot's token is deleted from this PC."),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => app.note_active("Telegram wasn't connected."),
+            Err(error) => app.fail_active(format!("Unable to delete the token: {error}")),
+        }
+        return;
+    }
+    if let Some(token) = args.strip_prefix("connect").map(str::trim).filter(|token| !token.is_empty()) {
+        let (tx, token) = (app.tx.clone(), token.to_string());
+        app.note_active("Checking that token with Telegram.");
+        tokio::spawn(async move {
+            let bot = crate::telegram::bot_name(&crate::telegram::api_base(&token)).await;
+            let _ = tx.send(AppEvent::PhoneChecked { token, bot });
+        });
+        return;
+    }
+    let status = match &app.phone {
+        Some(phone) if phone.settings.chat_id.is_some() => "Telegram is connected. Text your bot, or send it a voice memo. /telegram off disconnects it.".to_string(),
+        Some(phone) => format!("Waiting for your code. Send {} to your bot.", phone.code.as_deref().unwrap_or("nothing")),
+        None => "Message @BotFather on Telegram, send /newbot, then run /telegram connect <token> with the token it gives you.".to_string(),
+    };
+    app.note_active(status);
+}
+
+/// Starts the connection once Telegram has accepted a token. The token never appears in a message.
+pub fn finish_phone_connect(app: &mut App, token: String, bot: Option<String>) {
+    let Some(bot) = bot else {
+        app.fail_active("Telegram didn't accept that token. Copy it again from @BotFather.");
+        return;
+    };
+    let path = app.sessions_dir.with_file_name(TELEGRAM_FILE);
+    let settings = crate::telegram::Settings { token, chat_id: None };
+    if let Err(error) = crate::telegram::save(&path, &settings) {
+        app.fail_active(format!("Unable to save the connection: {error}"));
+        return;
+    }
+    let base = crate::telegram::api_base(&settings.token);
+    let (voice, tx) = (app.voice.clone(), app.tx.clone());
+    let phone = crate::telegram::Phone::start(base, settings, path, voice, tx);
+    let code = phone.code.clone().unwrap_or_default();
+    app.phone = Some(phone);
+    app.note_active(format!("Connected to @{bot}. To link your phone, send it this code: {code}. After that, only your chat can reach Olympus."));
+}
+
+fn chat_windows(app: &mut App) -> Vec<(u64, String)> {
+    app.windows.iter_mut().filter_map(|window| { let id = window.id; window.chat().map(|chat| (id, chat.state.title.clone())) }).collect()
+}
+
+const PHONE_HELP: &str = "Text me or send a voice memo, and I'll reply when the work is done.\n\n/threads lists your threads\n/use 2 switches to thread 2\n/new starts a new thread\n/stop stops the current work\n/schedules lists your schedules";
+
+/// Handles one message from Telegram.
+pub fn phone_message(app: &mut App, chat: i64, text: &str) {
+    let Some(phone) = app.phone.as_mut() else { return };
+    let text = text.trim();
+    if phone.settings.chat_id.is_none() {
+        pair_phone(phone, chat, text);
+        return;
+    }
+    let chats = chat_windows(app);
+    let current = app.phone.as_ref().and_then(|phone| phone.thread).filter(|id| chats.iter().any(|(chat, _)| chat == id)).or_else(|| chats.last().map(|(id, _)| *id));
+    let say = |app: &App, message: String| {
+        if let Some(phone) = &app.phone {
+            phone.say(message);
+        }
+    };
+    let (command, argument) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    match command {
+        "/start" | "/help" => say(app, PHONE_HELP.to_string()),
+        "/threads" => {
+            let list: Vec<String> = chats.iter().enumerate().map(|(index, (id, title))| format!("{}{}. {title}", if Some(*id) == current { "→ " } else { "" }, index + 1)).collect();
+            say(app, list.join("\n"));
+        }
+        "/use" => match argument.trim().parse::<usize>().ok().and_then(|number| number.checked_sub(1)).and_then(|index| chats.get(index)) {
+            Some((id, title)) => {
+                let (id, title) = (*id, title.clone());
+                if let Some(phone) = app.phone.as_mut() {
+                    phone.thread = Some(id);
+                }
+                say(app, format!("Now in: {title}"));
+            }
+            None => say(app, "Give a number from /threads, like /use 2.".to_string()),
+        },
+        "/new" => {
+            let (focused, cwd) = (app.active, app.current_cwd());
+            let id = app.new_chat(cwd);
+            app.active = focused;
+            if let Some(phone) = app.phone.as_mut() {
+                phone.thread = Some(id);
+            }
+            say(app, "Started a new thread. Your next message goes there.".to_string());
+        }
+        "/stop" => {
+            let stopped = current.and_then(|id| app.window_mut(id)).and_then(crate::session::Window::chat).is_some_and(|chat| {
+                chat.queue.clear();
+                chat.cancel.as_ref().is_some_and(|cancel| cancel.send(true).is_ok())
+            });
+            if !stopped {
+                say(app, "Nothing is running there.".to_string());
+            }
+        }
+        "/schedules" => {
+            let list = schedule_list(app);
+            say(app, list);
+        }
+        _ if text.starts_with('/') && !is_passed_on(command, &app.current_cwd()) => say(app, format!("I don't know {command}. Send /help to see what I can do.")),
+        _ => send_from_phone(app, current, chat, text),
+    }
+}
+
+// The code goes to anyone who opens the bot, so wrong guesses close the door for good.
+fn pair_phone(phone: &mut crate::telegram::Phone, chat: i64, text: &str) {
+    let Some(code) = phone.code.clone() else { return };
+    if text.eq_ignore_ascii_case(&code) {
+        let saved = phone.pair(chat);
+        phone.say(if saved.is_ok() { format!("Linked. Only this chat can reach Olympus now.\n\n{PHONE_HELP}") } else { "Linked for now, but I couldn't save it, so you'll need to pair again after a restart.".to_string() });
+        return;
+    }
+    phone.wrong_codes += 1;
+    if phone.wrong_codes >= crate::telegram::MAX_PAIRING_TRIES {
+        phone.code = None;
+    }
+}
+
+fn send_from_phone(app: &mut App, thread: Option<u64>, chat: i64, text: &str) {
+    let id = thread.unwrap_or_else(|| {
+        let (focused, cwd) = (app.active, app.current_cwd());
+        let id = app.new_chat(cwd);
+        app.active = focused;
+        id
+    });
+    if let Some(phone) = app.phone.as_mut() {
+        phone.thread = Some(id);
+        let _ = phone.outbox.send(crate::telegram::Outbound::Typing(chat));
+    }
+    let Some(window) = app.window_mut(id) else { return };
+    let busy = window.activity == Activity::Running;
+    let Some(thread_chat) = window.chat() else { return };
+    thread_chat.reply_to_phone = true;
+    let title = thread_chat.state.title.clone();
+    app.send(id, text.to_string());
+    if let Some(phone) = &app.phone {
+        phone.say(if busy { format!("Queued in: {title}") } else { format!("On it, in: {title}") });
+    }
+}
+
 fn loop_command(app: &mut App, args: &str) {
     const USAGE: &str = "Say what to repeat, like /loop 5m check the deploy. Use /loop stop to end it.";
     if args == "stop" {
@@ -188,12 +557,9 @@ fn loop_command(app: &mut App, args: &str) {
         app.fail_active("Open a chat to start a loop.");
         return;
     }
-    if prompt.starts_with('/') {
-        let name = prompt.split_whitespace().next().unwrap_or_default();
-        if COMMANDS.iter().any(|c| c.name == name) || !is_passed_on(name, &app.current_cwd()) {
-            app.fail_active(format!("/loop repeats a message or a skill, not {name}."));
-            return;
-        }
+    if let Err(problem) = repeatable(app, &prompt, "/loop") {
+        app.fail_active(problem);
+        return;
     }
     let every = every.map(|every| every.max(SHORTEST_LOOP));
     let id = app.active_id();
@@ -248,6 +614,12 @@ pub const COMMANDS: &[Command] = &[
     cmd("/reject", "/reject <id>", "Retire a lesson", true),
     cmd("/remember", "/remember <fact>", "Teach Olympus something directly", true),
     cmd("/loop", "/loop [5m] <message or /skill>|stop", "Repeat a message on a timer, or let the model pace it", true),
+    cmd("/schedule", "/schedule every 1h <message>|daily 08:00 <message>|list|stop <number>", "Run something on a timetable, even after a restart", true),
+    cmd("/search", "/search <words>", "Find words in your past Claude and Codex chats", true),
+    cmd("/save-skill", "/save-skill [name]", "Draft a skill from how this chat did its task", true),
+    cmd("/keep-skill", "/keep-skill <name>", "Approve a skill draft so it can be used", true),
+    cmd("/drop-skill", "/drop-skill <name>", "Delete a skill draft", true),
+    cmd("/telegram", "/telegram connect <token>|off", "Reach this Olympus from your phone", true),
     cmd("/screenshot", "/screenshot", "Drag a region of the screen into this message", false),
     cmd("/hotkeys", "/hotkeys on|off", "Shift+V to dictate and Shift+C to screenshot, in any app", true),
     cmd("/stop", "/stop", "Stop what this chat is doing", false),
@@ -1400,6 +1772,15 @@ pub fn run(app: &mut App, line: &str) {
         "/remember" => remember(app, args),
         "/notify" => notify_command(app, args),
         "/loop" => loop_command(app, args),
+        "/schedule" => schedule_command(app, args),
+        "/search" => search(app, args),
+        "/save-skill" => save_skill(app, args),
+        "/keep-skill" => keep_skill(app, args),
+        "/drop-skill" => match skills::drop_draft(&home_dir(), args) {
+            Ok(()) => app.note_active("Draft deleted."),
+            Err(problem) => app.fail_active(problem),
+        },
+        "/telegram" => telegram_command(app, args),
         "/hotkeys" => hotkeys_command(app, args),
         "/screenshot" => {
             let tx = app.tx.clone();
@@ -1461,6 +1842,146 @@ mod tests {
         assert_eq!(thread_provider(&mut app), Some(Provider::Codex));
         let old = app.window_mut(first).and_then(crate::session::Window::chat).expect("chat");
         assert_eq!(old.state.account_dir, None);
+    }
+
+    #[test]
+    fn schedules_parse_their_timing_and_need_a_message() {
+        use crate::schedule::When;
+        assert_eq!(parse_schedule("every 1h check the deploy"), Some((When::Every { seconds: 3600 }, "check the deploy".to_string())));
+        assert_eq!(parse_schedule("daily 08:30 summarize my day"), Some((When::Daily { hour: 8, minute: 30 }, "summarize my day".to_string())));
+        for bad in ["every 1h", "daily 25:00 x", "weekly 08:00 x", "every soon x", ""] {
+            assert_eq!(parse_schedule(bad), None, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_schedule_is_saved_runs_when_due_and_can_be_stopped() {
+        let (mut app, _rx, _dir) = app(true);
+        enter(&mut app, "/schedule every 1h check the deploy");
+        assert_eq!(app.schedules.len(), 1);
+        let path = app.sessions_dir.with_file_name(SCHEDULES_FILE);
+        assert_eq!(crate::schedule::load(&path), app.schedules, "it survives a restart");
+        run_due_schedules(&mut app);
+        assert!(!app.chat().expect("chat").state.blocks.iter().any(|b| matches!(b, Block::User(_))), "it isn't due yet");
+        app.schedules[0].last_run = 0;
+        run_due_schedules(&mut app);
+        let chat = app.chat().expect("chat");
+        assert!(chat.state.blocks.iter().any(|b| matches!(b, Block::User(text) if text == "check the deploy")));
+        assert!(chat.reply_to_phone);
+        assert!(app.schedules[0].last_run > 0);
+        enter(&mut app, "/schedule stop 1");
+        assert!(app.schedules.is_empty() && crate::schedule::load(&path).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_schedule_whose_thread_closed_gets_a_new_one_without_taking_the_focus() {
+        let (mut app, _rx, _dir) = app(true);
+        enter(&mut app, "/schedule every 1h check the deploy");
+        app.schedules[0].thread = "closed long ago".to_string();
+        app.schedules[0].last_run = 0;
+        let (windows, focused) = (app.windows.len(), app.active_id());
+        run_due_schedules(&mut app);
+        assert_eq!((app.windows.len(), app.active_id()), (windows + 1, focused));
+        assert_ne!(app.schedules[0].thread, "closed long ago");
+    }
+
+    #[tokio::test]
+    async fn schedules_refuse_olympus_commands_and_bad_input_explains_itself() {
+        let (mut app, _rx, _dir) = app(true);
+        for line in ["/schedule every 1h /review", "/schedule weekly x y", "/schedule stop 99", "/search", "/keep-skill nope", "/drop-skill nope"] {
+            enter(&mut app, line);
+            assert!(matches!(last_block(&mut app), Block::Error(_)), "{line}");
+        }
+        assert!(app.schedules.is_empty());
+    }
+
+    fn linked_phone(app: &mut App, code: Option<&str>) -> tokio::sync::mpsc::UnboundedReceiver<crate::telegram::Outbound> {
+        let path = app.sessions_dir.with_file_name(TELEGRAM_FILE);
+        let (phone, sent) = crate::telegram::Phone::detached(path, code.map(str::to_string));
+        app.phone = Some(phone);
+        sent
+    }
+
+    fn texts(sent: &mut tokio::sync::mpsc::UnboundedReceiver<crate::telegram::Outbound>) -> Vec<String> {
+        std::iter::from_fn(|| sent.try_recv().ok()).filter_map(|message| if let crate::telegram::Outbound::Text(_, text) = message { Some(text) } else { None }).collect()
+    }
+
+    #[tokio::test]
+    async fn only_the_code_links_a_phone_and_the_link_is_remembered() {
+        let (mut app, _rx, _dir) = app(true);
+        let mut sent = linked_phone(&mut app, Some("ABCD2345"));
+        let messages = app.chat().expect("chat").state.blocks.len();
+        phone_message(&mut app, 7, "hello");
+        assert!(texts(&mut sent).is_empty(), "a wrong code gets silence");
+        assert_eq!(app.chat().expect("chat").state.blocks.len(), messages, "and never reaches a model");
+        phone_message(&mut app, 7, "abcd2345");
+        assert!(texts(&mut sent)[0].starts_with("Linked."));
+        let saved = crate::telegram::load(&app.sessions_dir.with_file_name(TELEGRAM_FILE)).expect("saved");
+        assert_eq!(saved.chat_id, Some(7));
+    }
+
+    #[tokio::test]
+    async fn pairing_closes_for_good_after_too_many_wrong_codes() {
+        let (mut app, _rx, _dir) = app(true);
+        let mut sent = linked_phone(&mut app, Some("ABCD2345"));
+        for _ in 0..crate::telegram::MAX_PAIRING_TRIES {
+            phone_message(&mut app, 99, "guess");
+        }
+        phone_message(&mut app, 99, "ABCD2345");
+        assert!(texts(&mut sent).is_empty());
+        assert_eq!(app.phone.as_ref().expect("phone").settings.chat_id, None);
+    }
+
+    #[tokio::test]
+    async fn a_phone_message_runs_in_the_thread_and_the_result_comes_back() {
+        let (mut app, _rx, _dir) = app(true);
+        let mut sent = linked_phone(&mut app, Some("CODE"));
+        phone_message(&mut app, 7, "CODE");
+        texts(&mut sent);
+        let id = app.active_id();
+        phone_message(&mut app, 7, "fix the login");
+        assert!(texts(&mut sent)[0].starts_with("On it, in:"));
+        let target = Target::parse("claude:haiku").expect("target");
+        app.handle(AppEvent::TurnDone { window: id, target, result: olympus_core::event::TurnResult { text: "Fixed it.".into(), ..olympus_core::event::TurnResult::failed(olympus_core::event::Stop::Completed, "") } });
+        let replies = texts(&mut sent);
+        assert!(replies.iter().any(|reply| reply.contains("Fixed it.")), "{replies:?}");
+        assert!(!app.chat().expect("chat").reply_to_phone);
+    }
+
+    #[tokio::test]
+    async fn the_phone_can_list_and_switch_threads_without_moving_your_focus() {
+        let (mut app, _rx, dir) = app(true);
+        app.new_chat(dir.path().to_path_buf());
+        let focused = app.active_id();
+        let mut sent = linked_phone(&mut app, Some("CODE"));
+        phone_message(&mut app, 7, "CODE");
+        texts(&mut sent);
+        phone_message(&mut app, 7, "/threads");
+        assert!(texts(&mut sent)[0].contains("2. "));
+        phone_message(&mut app, 7, "/use 1");
+        assert!(texts(&mut sent)[0].starts_with("Now in:"));
+        phone_message(&mut app, 7, "/use 99");
+        assert!(texts(&mut sent)[0].contains("from /threads"));
+        phone_message(&mut app, 7, "/new");
+        assert_eq!(app.active_id(), focused);
+        phone_message(&mut app, 7, "/banana");
+        assert!(texts(&mut sent).last().expect("reply").contains("/help"));
+    }
+
+    #[tokio::test]
+    async fn a_long_task_offers_to_become_a_skill_and_a_short_one_does_not() {
+        let (mut app, _rx, _dir) = app(true);
+        let id = app.active_id();
+        let target = Target::parse("claude:haiku").expect("target");
+        let done = || olympus_core::event::TurnResult { text: "done".into(), ..olympus_core::event::TurnResult::failed(olympus_core::event::Stop::Completed, "") };
+        app.chat().expect("chat").push(Block::User("do it".into()));
+        app.handle(AppEvent::TurnDone { window: id, target: target.clone(), result: done() });
+        assert!(!app.chat().expect("chat").state.blocks.iter().any(|b| matches!(b, Block::Note(text) if text.contains("/save-skill"))));
+        for step in 0..STEPS_WORTH_SAVING {
+            app.chat().expect("chat").push(Block::Tool { id: step.to_string(), name: "Bash".into(), detail: String::new(), status: crate::session::ToolStatus::Ok, summary: String::new() });
+        }
+        app.handle(AppEvent::TurnDone { window: id, target, result: done() });
+        assert!(app.chat().expect("chat").state.blocks.iter().any(|b| matches!(b, Block::Note(text) if text.contains("/save-skill"))));
     }
 
     #[tokio::test]

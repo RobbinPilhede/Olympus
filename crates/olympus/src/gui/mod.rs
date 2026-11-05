@@ -194,6 +194,9 @@ impl Root {
         crate::capture::prune_in_background();
         crate::hotkeys::set_enabled(!home_dir().join(crate::app::HOTKEYS_OFF).exists());
         let (voice, shots) = (crate::voice::spawn(), tx.clone());
+        app.voice = Some(voice.clone());
+        commands::resume_phone(&mut app);
+        commands::start_schedule_clock(tx.clone());
         crate::hotkeys::spawn(move |signal| match signal {
             Signal::Start(Chord::Voice) => voice.start(false),
             Signal::StartLocked => voice.start(true),

@@ -209,11 +209,13 @@ impl Parser {
 }
 
 /// Runs one Claude Code turn through the unmodified signed-in binary.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     exe: &Path,
     req: &TurnRequest,
     system: &str,
     mcp_config: Option<&str>,
+    guard_exe: &Path,
     idle: Duration,
     cancel: Cancel,
     emit: &mut (dyn FnMut(AgentEvent) + Send),
@@ -221,6 +223,9 @@ pub async fn run(
     stagger("claude", Duration::from_millis(400)).await;
     let mut cmd = Command::new(exe);
     cmd.args(build_args(req, system, mcp_config)).current_dir(&req.cwd);
+    if req.access == Access::Full {
+        cmd.args(["--settings".to_string(), crate::guard::claude_settings(guard_exe)]);
+    }
     scrub_env(&mut cmd);
     cmd.env("OLYMPUS_DEPTH", req.depth.to_string());
     if let Some(dir) = &req.account_dir {

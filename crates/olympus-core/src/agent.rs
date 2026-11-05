@@ -137,14 +137,14 @@ pub async fn run_turn(rt: &Runtime, req: &TurnRequest, cancel: Cancel, emit: &mu
         Provider::Claude => match &rt.claude {
             Some(bin) => {
                 let config = bridge.then(|| claude_mcp_config(&rt.self_exe));
-                claude::run(&bin.path, req, &system, config.as_deref(), idle, cancel, &mut forward).await
+                claude::run(&bin.path, req, &system, config.as_deref(), &rt.self_exe, idle, cancel, &mut forward).await
             }
             None => Ok(TurnResult::failed(Stop::Failed, "Claude Code wasn't found. Install it, then restart Olympus.")),
         },
         Provider::Codex => match &rt.codex {
             Some(bin) => {
                 let mcp = bridge.then_some(rt.self_exe.as_path());
-                codex::run(&bin.path, req, &system, mcp, idle, cancel, &mut forward).await
+                codex::run(&bin.path, req, &system, mcp, &rt.self_exe, idle, cancel, &mut forward).await
             }
             None => Ok(TurnResult::failed(Stop::Failed, "Codex wasn't found. Install it, then restart Olympus.")),
         },

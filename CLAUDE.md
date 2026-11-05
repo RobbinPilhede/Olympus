@@ -27,11 +27,13 @@ The owner runs this on their own PC and network, and accessibility is not a conc
 | `crates/olympus/src/capture.rs` | Screenshot overlay with pencil and its toolbar (pure `Shot` and `Toolbar` logic, GDI drawing), clipboard files, attachments |
 | `crates/olympus/src/notify.rs` | Finish chime and Windows notifications |
 | `crates/olympus/src/update.rs`, `gui/splash.rs` | Installer, uninstaller, self-update, and the launch animation |
+| `crates/olympus/src/schedule.rs`, `telegram.rs` | Saved timetables (pure `is_due`), and the Telegram bot with pairing and voice memo decoding |
 | `crates/olympus-core/src/agent.rs`, `claude.rs`, `codex.rs`, `openai.rs`, `node.rs` | One turn on each provider |
 | `crates/olympus-core/src/runtime.rs`, `target.rs`, `limits.rs`, `discovery.rs` | Routing, model targets, quotas, finding CLIs, accounts and past sessions |
 | `crates/olympus-core/src/workflow.rs`, `git.rs`, `roles.rs` | `/auto`, `/council`, `/review` |
-| `crates/olympus-core/src/mcp.rs`, `tools.rs`, `skills.rs` | The model bridge agents call, native tools, skill search |
-| `crates/olympus-learn` | History ingest, lessons, routing, stored in `learn.db` |
+| `crates/olympus-core/src/mcp.rs`, `tools.rs`, `skills.rs` | The model bridge agents call, native tools, skill search and drafts |
+| `crates/olympus-core/src/guard.rs` | The block list for catastrophic shell commands, and the hook both CLIs call (`olympus guard`) |
+| `crates/olympus-learn` | History ingest, full-text message search (`ingest/messages.rs`), lessons, routing, stored in `learn.db` |
 | `crates/olympus-node` | LAN server, downloads, model store, console |
 | `vendor/infr` | Vendored pure-Rust inference engine used by the node |
 
@@ -39,7 +41,7 @@ Adding a slash command takes one row in `COMMANDS` and one arm in `run`, both in
 
 ## The owner's data
 
-Everything is in `~/.olympus`: `config.toml` (settings), `sessions/` (saved threads), `last.json`, `learn.db`, `usage.json`, `oa-sessions/`, `attachments/` (deleted after 7 days), `models/whisper/`, `wt/` (worktrees), `tools/` (build tools), `crash.log` (written after a crash).
+Everything is in `~/.olympus`: `config.toml` (settings), `sessions/` (saved threads), `schedules.json`, `telegram.json` (holds the bot's token), `skill-drafts/`, `last.json`, `learn.db`, `usage.json`, `oa-sessions/`, `attachments/` (deleted after 7 days), `models/whisper/`, `wt/` (worktrees), `tools/` (build tools), `crash.log` (written after a crash).
 
 When the owner reports a bug, look here first. Don't change or delete their data unless they ask. Claude's history is in `~/.claude/projects`, and earlier Olympus sessions from this folder can be read there.
 
@@ -101,6 +103,11 @@ cargo test -p olympus-core --test live -- --ignored
 - Unknown slash names stay an error, so a typo can't start a paid turn. Real skills pass through `is_passed_on`.
 - `--disable-slash-commands` in the lean profile blocks skills, which is why a skill turn runs on the full profile.
 - `/loop` is native because Claude Code's `CronCreate` dies with each `claude -p` process.
+- The guard replies with `permissionDecision: deny` and exit code 0. Codex ignores exit code 2 when approvals are bypassed. Codex runs hooks in PowerShell and Claude Code in bash, so their commands are quoted differently. `TEST_PHRASE` lets the live tests prove a block without any risk.
+- `--dangerously-bypass-hook-trust` on Codex turns is only for Olympus's own hook, and its warning is filtered from the chat.
+- `codex` on `PATH` can be much older than the desktop app's copy in `%LOCALAPPDATA%\OpenAI\Codex\bin`, which is the one discovery prefers. Test Codex behaviour with that one.
+- Telegram request errors contain the address, and the address contains the token, so `telegram.rs` never passes them on.
+- `learn.db`'s schema version rises with new migrations, and an older Olympus refuses a newer file. So going back to an older build disables its learning store.
 - Sending a picture to a node returned an empty reply. Node vision doesn't work yet.
 
 ## How the owner works
