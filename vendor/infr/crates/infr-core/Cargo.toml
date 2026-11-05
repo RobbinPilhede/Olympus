@@ -1,0 +1,21 @@
+[package]
+name = "infr-core"
+description = "Shared types and backend, loader and graph seams for the infr LLM inference engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+infr-plat.workspace = true
+infr-prof.workspace = true
+infr-prof-rt.workspace = true
+thiserror.workspace = true
+half.workspace = true
+bytemuck.workspace = true
+indicatif.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

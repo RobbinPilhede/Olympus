@@ -1,0 +1,15 @@
+# Whisper's Vulkan build nests deep enough to pass Windows's 260-character path limit.
+[build]
+build-dir = "C:/ot"
+
+# Real environment variables win, so tools installed elsewhere only need these set.
+[env]
+CMAKE = { value = ".tools/cmake/bin/cmake.exe", relative = true }
+LIBCLANG_PATH = { value = ".tools/libclang", relative = true }
+VULKAN_SDK = { value = ".tools/vulkan", relative = true }
+# whisper-rs-sys drops /O2 and AVX unless the flags are set this way, leaving it 50 times slower.
+CMAKE_C_FLAGS_RELEASE = "/O2 /Ob2 /DNDEBUG /MT /arch:AVX2 /D__FMA__ /D__F16C__"
+CMAKE_CXX_FLAGS_RELEASE = "/O2 /Ob2 /DNDEBUG /MT /arch:AVX2 /D__FMA__ /D__F16C__ /EHsc /utf-8"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

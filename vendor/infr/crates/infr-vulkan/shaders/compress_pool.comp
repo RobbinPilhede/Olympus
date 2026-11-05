@@ -1,0 +1,55 @@
+#version 460
+// DeepSeek V4 compressor pooling (`Op::CompressPool`, the four fused ggml nodes shared by
+// `build_hca_compressed_kv_from_state` and `build_overlap_compressed_kv_from_state`):
+//
+//   m        = max_w scores[b, w, c]
+//   dst[b,c] = (sum_w values[b, w, c]*exp(scores[b, w, c] - m)) / (sum_w exp(scores[b, w, c] - m))
+//
+// The softmax is over the WINDOW axis per channel, NOT over n_embd — the reference gets that by
+// permuting the window to the fast axis before `ggml_soft_max`; here it is the strided axis and
+// the permute costs nothing. One thread per output element (`total = blocks*n_embd`), each
+// walking its own window.
+//
+// The max-subtract is what makes the `-inf` sentinel rows weigh exactly zero. A window that is
+// ENTIRELY `-inf` writes 0.0 (see `Op::CompressPool` — a deliberate deviation from ggml's NaN).
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PC {
+    uint window;
+    uint n_embd;
+    uint total;   // blocks * n_embd
+} pc;
+
+layout(binding = 0) readonly buffer VB { float values[]; };
+layout(binding = 1) readonly buffer SB { float scores[]; };
+layout(binding = 2) writeonly buffer DB { float dst[]; };
+
+void main() {
+    // Flat workgroup index, recovered across a 2-D split: `Recorder::dispatch_wide` folds a grid
+    // wider than `maxComputeWorkGroupCount[0]` into (gx, gy), and `blocks*n_embd` reaches that at
+    // a real V4 context length (a CSA layer at 128k tokens is ~33k blocks). Identical to
+    // `gl_WorkGroupID.x` whenever the grid already fit in one dimension.
+    uint g = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint i = g*gl_WorkGroupSize.x + gl_LocalInvocationID.x;
+    if (i >= pc.total) { return; }
+    uint b = i / pc.n_embd;
+    uint c = i - b*pc.n_embd;
+    uint base = b*pc.window*pc.n_embd + c;
+
+    // -inf as a bit pattern: a literal `-1.0/0.0` is a constant-folded division by zero, which
+    // glslc rejects (same idiom as `topk_mask.comp`).
+    float m = uintBitsToFloat(0xFF800000u);
+    for (uint w = 0u; w < pc.window; ++w) {
+        m = max(m, scores[base + w*pc.n_embd]);
+    }
+    if (isinf(m) && m < 0.0) { dst[i] = 0.0; return; }
+
+    float acc = 0.0;
+    float den = 0.0;
+    for (uint w = 0u; w < pc.window; ++w) {
+        float e = exp(scores[base + w*pc.n_embd] - m);
+        den += e;
+        acc = fma(values[base + w*pc.n_embd], e, acc);
+    }
+    dst[i] = acc / den;
+}

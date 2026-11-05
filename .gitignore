@@ -1,0 +1,11 @@
+/target
+/.tools
+/.olympus
+/.claude
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.db
+*.exe

@@ -1,0 +1,32 @@
+[package]
+name = "olympus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "olympus"
+path = "src/main.rs"
+
+[dependencies]
+olympus-core.workspace = true
+olympus-learn.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+gpui = "0.2.2"
+portable-pty = "0.9.0"
+vt100 = "=0.16.2"
+pulldown-cmark = { version = "0.13", default-features = false }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Security", "Win32_System_Console", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+whisper-rs = { version = "0.15", features = ["vulkan"] }
+cpal = "0.16"
+png = "0.18"
+image = { version = "0.25", default-features = false }
+
+[build-dependencies]
+embed-resource = "3.0.12"
+
+[dev-dependencies]
+tempfile.workspace = true

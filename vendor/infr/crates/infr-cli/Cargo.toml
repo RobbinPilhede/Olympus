@@ -1,0 +1,31 @@
+[package]
+name = "infr-cli"
+description = "Pure-Rust LLM inference engine with an OpenAI-compatible server (the infr binary)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+
+[[bin]]
+name = "infr"
+path = "src/main.rs"
+
+[dependencies]
+infr-core.workspace = true
+infr-plat.workspace = true
+infr-prof-rt.workspace = true
+infr-vulkan.workspace = true
+infr-hub.workspace = true
+infr-engine.workspace = true
+infr-server.workspace = true
+infr-llama.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+clap_complete_nushell.workspace = true
+clap_mangen.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

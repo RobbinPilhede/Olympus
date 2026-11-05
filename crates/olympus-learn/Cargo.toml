@@ -1,0 +1,15 @@
+[package]
+name = "olympus-learn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ruzstd = "0.8"
+anyhow.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

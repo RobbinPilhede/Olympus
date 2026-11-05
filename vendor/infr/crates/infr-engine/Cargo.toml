@@ -1,0 +1,17 @@
+[package]
+name = "infr-engine"
+description = "Chat text logic shared by infr's run and serve commands"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+infr-core.workspace = true
+infr-chat.workspace = true
+infr-gguf.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

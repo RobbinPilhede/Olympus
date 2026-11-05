@@ -1,0 +1,109 @@
+#version 460
+// Reassociation-tolerant subgroup+NUM_ROWS variant of native_gemv_id_multi: the id-indexed multi-slot
+// decode GEMV (y = x·W[ids[slot]]ᵀ over all n_used routed experts) rebuilt on the wave32 +
+// subgroupAdd + NR-rows/workgroup structure from native_gemv_sg (NO shared reduce, NO barrier). Each
+// wave keeps 32×NR weight-load requests in flight — the extra MLP the shallow low-out_f MoE expert
+// down-projection grid (Q6_K, out_f≈2048 — the LARGEST subgroup win of all the decode shapes) needs to
+// saturate DRAM, which the 64-thread tree-reduce id kernel leaves on the table. The id addressing is
+// unchanged (weight base = ids[slot_global]*stride + o*in_f); only the K-reduction is reassociated.
+//
+// NOT bit-identical to native_gemv_id_multi: wave32 lane partitioning + the subgroupAdd reduction tree
+// REORDER the float accumulation vs the 64-thread shared tree-reduce (a valid different summation
+// order, ULP-level per element — same class as the blessed int8 mmv path). Gated to the Q6_K
+// projection band ONLY in the recorder (see native_sg_choice / native_id_sg_choice). -DNR=N selects
+// rows/workgroup. Requires requiredSubgroupSize=SG.
+//
+// -DSG=16|32 (default 32): pinned subgroup width — one subgroup per workgroup, lanes stride SG
+// sub-blocks, subgroupAdd spans SG lanes (same reduction, different summation order — already
+// blessed reassociation-tolerant). SG=16 = the Intel build (see caps.sg_pref); the SG=32 SPIR-V is
+// bit-identical to the pre-SG code.
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+
+#ifndef SG
+#define SG 32
+#endif
+layout(local_size_x = SG, local_size_y = 1, local_size_z = 1) in;
+
+// `rows`: total dispatched-should-be workgroup count is rows*n_used*ceil(out_f/NR) — needed ONLY
+// to bound-check the flat index against a padding workgroup from a possibly-2-D dispatch grid.
+// Resident-BDA (STREAMED is the only weight build): the stacked role tensor lives in a resident
+// BDA arena at the 64-bit base passed as arena_lo/arena_hi; the expert base is `ids[slot_global]`
+// scaled by `stride`, REPURPOSED as the per-expert BYTE stride on the 64-bit pointer (see
+// native_gemv_id.comp's STREAMED doc). No bound weight SSBO exists.
+layout(push_constant) uniform PC {
+    uint in_f; uint out_f; uint n_used; uint stride; uint x_per_slot; uint rows;
+    uint arena_lo; uint arena_hi;
+} pc;
+layout(binding = 1) readonly buffer XB { float x_buf[]; };
+layout(binding = 2) readonly buffer IDB { uint ids[]; };
+layout(binding = 3) buffer YB { float y_buf[]; };
+
+#ifndef NR
+#define NR 2
+#endif
+
+#include "native_weight_addr.glsl"
+#define NW(i) arena_word(i)
+
+#include "native_decode.glsl"
+
+// Dot one 32-elem sub-block of weights (decoded once) against the matching activation run.
+float dqsub(uint gstart, uint xoff) {
+    float v[32];
+    dqblk(gstart, v);
+    float a = 0.0;
+    for (uint w = 0u; w < 32u; w++) { a += v[w] * x_buf[xoff + w]; }
+    return a;
+}
+
+void main() {
+    // Grid-codebook builds (IQ2_S/IQ3_S) stage their codebook into `shared` here — barrier inside,
+    // so it must precede the workgroup-uniform early return below. Non-grid builds (Q5_K/Q6_K)
+    // expand this to an empty statement, leaving their SPIR-V byte-identical.
+    //
+    // NR rows/workgroup is what makes this tier pay for the GRID formats, and for a different
+    // reason than it pays for Q5_K/Q6_K: the tree id kernel computes ONE output row per workgroup,
+    // so every workgroup re-stages the WHOLE table (8 KB for IQ2_S) to serve a single row's worth
+    // of gathers — staging costs more than the dot product it feeds. NR folds the workgroup count
+    // (and the staging with it) down by NR. Ablating grid_init() entirely on
+    // Qwen3.6-35B-A3B-UD-IQ3_S tg64 measured native_idm_iq2s 49.8 → 23.3ms and native_idm_iq3s
+    // 42.0 → 18.9ms — i.e. ~50ms of a 505ms decode was pure per-workgroup staging.
+    GRID_INIT;
+    uint lane = gl_SubgroupInvocationID; // 0..SG-1
+    uint og = (pc.out_f + uint(NR) - 1u) / uint(NR); // output-row groups per (row, slot)
+    // Flat-index recovery for a possibly-2-D dispatch grid — see linear_f16.comp's main() for why.
+    // `slot_global` drives an UNGUARDED `ids[]` read below, so this needs an explicit bound (the
+    // per-lane `o < pc.out_f` checks further down don't protect that read).
+    uint unit = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (unit >= pc.rows * pc.n_used * og) { return; }
+    uint slot_global = unit / og;                    // (row, slot) flattened — see native_gemv_id_multi
+    uint o0 = (unit - slot_global * og) * uint(NR);  // first output row this workgroup owns
+    uint row = slot_global / pc.n_used;
+    // Expert base BYTE address straight from `ids`; `pc.stride` is the per-expert BYTE stride.
+    // wexp keeps only the small within-expert element offset (0 — the pointer IS the expert base).
+    w_addr = arena_base(pc.arena_lo, pc.arena_hi)
+             + uint64_t(ids[slot_global]) * uint64_t(pc.stride);
+    uint wexp = 0u;
+    uint xbase = (pc.x_per_slot != 0u ? slot_global * pc.in_f : row * pc.in_f);
+    uint nsub = pc.in_f / 32u;
+    float acc[NR];
+    [[unroll]] for (uint rr = 0u; rr < uint(NR); rr++) { acc[rr] = 0.0; }
+    for (uint s = lane; s < nsub; s += uint(SG)) {
+        uint xoff = xbase + s * 32u;
+        [[unroll]] for (uint rr = 0u; rr < uint(NR); rr++) {
+            uint o = o0 + rr;
+            if (o < pc.out_f) {
+                acc[rr] += dqsub(wexp + o * pc.in_f + s * 32u, xoff);
+            }
+        }
+    }
+    [[unroll]] for (uint rr = 0u; rr < uint(NR); rr++) {
+        float sum = subgroupAdd(acc[rr]);
+        uint o = o0 + rr;
+        if (lane == 0u && o < pc.out_f) {
+            y_buf[slot_global * pc.out_f + o] = sum;
+        }
+    }
+}

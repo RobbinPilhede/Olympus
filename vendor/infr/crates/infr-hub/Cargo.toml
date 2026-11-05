@@ -1,0 +1,21 @@
+[package]
+name = "infr-hub"
+description = "Hugging Face Hub model download and cache resolution for infr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+infr-core.workspace = true
+infr-plat.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+indicatif.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
