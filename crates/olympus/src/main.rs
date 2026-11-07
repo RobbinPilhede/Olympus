@@ -4,6 +4,7 @@
 mod app;
 mod app_list;
 mod jarvis;
+mod remember;
 mod speech;
 mod capture;
 mod commands;

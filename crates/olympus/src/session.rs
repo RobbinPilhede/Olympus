@@ -157,6 +157,8 @@ pub fn short_duration(duration: Duration) -> String {
 pub struct Chat {
     pub state: ChatState,
     pub pending_run: Option<PendingRun>,
+    /// How many of your messages have been reviewed for memory. Only counts this run, so old threads aren't re-read.
+    pub memory_seen: usize,
     pub queue: VecDeque<String>,
     pub cancel: Option<watch::Sender<bool>>,
     pub last_prompt: String,
@@ -186,7 +188,8 @@ impl Chat {
 
     /// Rebuilds a chat from saved state.
     pub fn restore(state: ChatState, file_id: String) -> Self {
-        Self { state, pending_run: None, queue: VecDeque::new(), cancel: None, last_prompt: String::new(), failed_over: false, looping: None, reply_to_phone: false, follow: false, dirty_from: Some(0), revision: 0, touches: VecDeque::new(), elsewhere: None, file_id }
+        let memory_seen = state.blocks.iter().filter(|block| matches!(block, Block::User(_))).count();
+        Self { state, memory_seen, pending_run: None, queue: VecDeque::new(), cancel: None, last_prompt: String::new(), failed_over: false, looping: None, reply_to_phone: false, follow: false, dirty_from: Some(0), revision: 0, touches: VecDeque::new(), elsewhere: None, file_id }
     }
 
     /// True until a message or `/rename` gives the chat a topic; older chats were titled after their folder.

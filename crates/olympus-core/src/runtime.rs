@@ -5,7 +5,7 @@ use crate::target::{Provider, Target};
 use anyhow::Result;
 use olympus_learn::{classify_task, Store};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Cost tier of a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -39,12 +39,16 @@ impl Tier {
 /// Shared state for every session and workflow.
 pub struct Runtime {
     pub config: Config,
+    /// Separate from `config` so a key added in the app works without a restart.
+    pub openrouter_key: RwLock<Option<String>>,
     pub claude: Option<Bin>,
     pub codex: Option<Bin>,
     pub limits: Arc<Limits>,
     pub learn: Option<Arc<Mutex<Store>>>,
     pub self_exe: PathBuf,
     pub rules: String,
+    /// What new sessions load about you.
+    pub memory_file: PathBuf,
 }
 
 impl Runtime {
@@ -67,6 +71,7 @@ impl Runtime {
         }
         let learn = Store::open(&home.join("learn.db")).ok().map(|s| Arc::new(Mutex::new(s)));
         Ok(Runtime {
+            openrouter_key: RwLock::new(config.openrouter_key()),
             config,
             claude: discovery::find_claude(),
             codex: discovery::find_codex(),
@@ -74,7 +79,20 @@ impl Runtime {
             learn,
             self_exe: std::env::current_exe()?,
             rules,
+            memory_file: crate::memory::default_file(),
         })
+    }
+
+    /// The OpenRouter key in use right now.
+    pub fn openrouter_key(&self) -> Option<String> {
+        self.openrouter_key.read().ok().and_then(|key| key.clone())
+    }
+
+    /// Changes the OpenRouter key for every turn from now on.
+    pub fn set_openrouter_key(&self, key: Option<String>) {
+        if let Ok(mut slot) = self.openrouter_key.write() {
+            *slot = key;
+        }
     }
 
     /// True when the CLI or key behind a provider is present.
@@ -82,7 +100,7 @@ impl Runtime {
         match provider {
             Provider::Claude => self.claude.is_some(),
             Provider::Codex => self.codex.is_some(),
-            Provider::OpenRouter => self.config.openrouter_key().is_some(),
+            Provider::OpenRouter => self.openrouter_key().is_some(),
             Provider::Node(_) => true,
         }
     }
@@ -166,6 +184,8 @@ mod tests {
         let bin = || Some(Bin { path: PathBuf::from("x"), version: "1".into() });
         Runtime {
             config: Config::default(),
+            openrouter_key: RwLock::default(),
+            memory_file: PathBuf::new(),
             claude: bin(),
             codex: bin(),
             limits: Arc::new(Limits::default()),

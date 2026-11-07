@@ -101,7 +101,12 @@ async fn memory_text(rt: &Runtime, run_id: &str, req: &TurnRequest) -> String {
     .unwrap_or_default()
 }
 
-fn compose_system(rt: &Runtime, req: &TurnRequest, memory: &str) -> String {
+// OpenRouter passes prompts to outside companies, some of which log them, so your profile stays off it.
+fn loads_profile(req: &TurnRequest) -> bool {
+    req.resume.is_none() && req.use_memory && req.depth == 0 && req.target.provider != Provider::OpenRouter
+}
+
+fn compose_system(rt: &Runtime, req: &TurnRequest, memory: &str, profile: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     if rt.config.share_user_rules && !rt.rules.is_empty() && req.profile == Profile::Lean {
         parts.push(&rt.rules);
@@ -111,6 +116,9 @@ fn compose_system(rt: &Runtime, req: &TurnRequest, memory: &str) -> String {
     }
     if req.depth == 0 && req.access == Access::Full {
         parts.push(roles::BRIDGE_HINT);
+    }
+    if !profile.is_empty() {
+        parts.push(profile);
     }
     if !memory.is_empty() {
         parts.push(memory);
@@ -123,7 +131,8 @@ pub async fn run_turn(rt: &Runtime, req: &TurnRequest, cancel: Cancel, emit: &mu
     let run_id = next_run_id();
     let fresh = req.resume.is_none();
     let memory = if fresh && req.use_memory && req.access == Access::Full { memory_text(rt, &run_id, req).await } else { String::new() };
-    let system = if fresh { compose_system(rt, req, &memory) } else { String::new() };
+    let profile = if loads_profile(req) { crate::memory::for_system_prompt(&rt.memory_file) } else { String::new() };
+    let system = if fresh { compose_system(rt, req, &memory, &profile) } else { String::new() };
     let idle = Duration::from_secs(rt.config.idle_timeout_secs);
     let bridge = req.depth == 0 && req.access == Access::Full;
     let limits = rt.limits.clone();
@@ -176,4 +185,21 @@ pub async fn record_outcome(rt: &Runtime, run_id: &str, req: &TurnRequest, usage
         corrected,
     };
     let _ = tokio::task::spawn_blocking(move || store.lock().ok().map(|s| s.record_run(&run))).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn your_profile_loads_on_new_sessions_but_not_on_openrouter_or_internal_turns() {
+        let request = |spec: &str| TurnRequest { depth: 0, ..TurnRequest::new(Target::parse(spec).expect("target"), "hi", PathBuf::from(".")) };
+        assert!(loads_profile(&request("claude:haiku")));
+        let read_only = TurnRequest { access: Access::ReadOnly, ..request("codex:gpt-6-luna") };
+        assert!(loads_profile(&read_only), "Jarvis's read-only turns know you too");
+        assert!(!loads_profile(&request("openrouter:a/b")));
+        assert!(!loads_profile(&TurnRequest { resume: Some("s".into()), ..request("claude:haiku") }));
+        assert!(!loads_profile(&TurnRequest { use_memory: false, ..request("claude:haiku") }));
+        assert!(!loads_profile(&TurnRequest { depth: 1, ..request("claude:haiku") }));
+    }
 }

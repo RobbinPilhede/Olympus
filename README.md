@@ -29,7 +29,8 @@ If you pay for more than one AI coding tool, you end up juggling terminals, acco
 - **They work together.** Ask a second opinion mid-chat, have several models debate a decision, or let one build while another reviews.
 - **It feels like a CLI.** GPU-drawn with [GPUI](https://gpui.rs), driven from the keyboard, and everything is one `Alt+K` away.
 - **It spends fewer tokens.** Lean startup, on-demand skills and cheapest-first routing.
-- **It learns from you.** Your past corrections become lessons and finished tasks can become skills, and nothing is used until you approve it.
+- **It remembers you.** After each task it notes anything lasting about you and how you like to work, and every new session starts knowing it. `/memory` shows it all.
+- **It learns from your history.** Your past corrections become lessons and finished tasks can become skills, and those aren't used until you approve them.
 - **It reaches your phone.** Flip one switch and the whole app opens in your phone's browser on the same network. Or text your own Telegram bot from anywhere.
 - **It knows what's going on.** Obiview, the pinned Jarvis thread, reads what's on your screen with no accounts or API keys, and files it into a Markdown vault with a graph of how your notes connect.
 - **Your chats follow you.** Connect any cloud storage and carry on with the same chat, memory included, on another PC.
@@ -156,6 +157,16 @@ Hold **Shift+V** to dictate into whatever app you're using. It runs on your GPU,
 - **Failover.** When a vendor hits its limit, work continues on the other with a short handoff.
 - **Bounded memory.** At most 400 tokens of lessons per session, and 20% of runs get none so the benefit can be measured.
 
+### Memory
+
+Olympus keeps a small file about you, `~/.olympus/memory.md`, with two parts: **About you** and **How to work with you**. New sessions load it (up to 4,000 characters, about 1,000 tokens), and Jarvis uses it too.
+
+After a task finishes, your cheapest Claude or ChatGPT model reads what you typed or said since the last review and updates the file by itself. It adds new facts and replaces outdated ones, then shows what changed in that thread. Each review is one small turn on your subscription, and it's skipped when you've only said a few words.
+
+- **What it learns from:** only your own messages. It doesn't read the model's replies, messages over 2,000 characters (usually pastes), or what Obiview read, so a planted instruction in a mail or web page has no direct way in. Text you paste into a shorter message can still reach it. The review is told not to store that, and lines that read like orders, or hold links or keys, are refused.
+- **Where it goes:** threads on OpenRouter don't get it, because OpenRouter passes prompts to outside companies. The file isn't synced to your other PCs.
+- **You're in charge:** `/memory` shows it, `/memory forget <words>` removes entries, and `/memory off` stops both loading and learning. You can edit the file by hand, and anything that isn't an entry stays as you wrote it.
+
 ### Learn from your history
 
 - History from `~/.claude` and `~/.codex`, including compressed archives, is read into `~/.olympus/learn.db` in the background. It stores signals, short prompts, and your messages and the replies for search (up to 4,000 characters each), with anything that looks like a key removed. Tool output isn't stored. The file stays on your PC.
@@ -175,6 +186,7 @@ Everything is reachable from `Alt+K`.
 | Any message | Goes to this chat's model, with permissions bypassed |
 | `/model auto` | Routes each new chat by task type and learned results |
 | `/account`, `/account add work`, `/account add chatgpt work`, or click a thread's account line | Chooses that thread's Claude or ChatGPT account, or signs in to another. Picking an account on the other provider moves the thread there. Chats and `@` questions use it; `/auto`, `/council` and `/review` use your default accounts |
+| `/account add openrouter <key>`, or **Add an OpenRouter key** in `/account` | Connects OpenRouter with a key from [openrouter.ai/keys](https://openrouter.ai/keys). It checks the key, saves it in `config.toml`, then lists every model with its price. Only threads you put on it are billed. `/model openrouter` changes the model, and `/account remove openrouter` deletes the key |
 | **+ New** | Asks which account to start the new chat on, then which folder. `Alt+N` and `/new` start right away on this thread's model, account and folder |
 | The thread list | Each thread shows its topic (from your first message, or `/rename`), who it's connected to, and that account's usage. Drag a thread up or down to move it; the order is kept after a restart |
 | `/sessions` | Reopens any past Claude or Codex session |
@@ -190,6 +202,7 @@ Everything is reachable from `Alt+K`.
 | `/jarvis <question>` | Asks what's going on, from what Obiview has read and your notes |
 | `/telegram connect <token>`, `/telegram`, `/telegram off` | Connects your own Telegram bot, shows its status, or disconnects and deletes its token |
 | `/remember always use pnpm` | Teaches Olympus directly |
+| `/memory`, `/memory forget <words>`, `/memory off`, `/memory on` | Shows or changes what it has learned about you |
 | `/usage` | Quotas, spend, and whether memory is actually helping |
 
 </details>
@@ -253,13 +266,13 @@ Keys are never stored in this repo or in the app. Set them in your environment:
 
 | Variable | Used for |
 | --- | --- |
-| `OPENROUTER_API_KEY` | OpenRouter models (or set `openrouter_key` in `config.toml`) |
+| `OPENROUTER_API_KEY` | OpenRouter models, if you don't add a key with `/account` |
 | `HF_TOKEN` | Gated Hugging Face models on a node |
 | `OLYMPUS_NODE_TOKEN` | The token a node requires. Set the same value as `node_token` in `config.toml` |
 | `OLYMPUS_MIRROR_PORT` | The port for phone access, instead of 47480 |
 | `OLYMPUS_TELEGRAM_TOKEN` | Your Telegram bot's token, instead of the one `/telegram connect` saves in `~/.olympus/telegram.json` |
 
-Your data stays in `~/.olympus`: settings, saved threads, `learn.db`, usage and attachments.
+Your data stays in `~/.olympus`: settings, saved threads, `memory.md`, `learn.db`, usage and attachments.
 
 ## Safety and secrets
 

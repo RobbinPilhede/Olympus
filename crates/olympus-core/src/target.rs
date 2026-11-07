@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn round_trips_every_provider() {
-        for spec in ["claude:opus", "codex:gpt-6.1-sol@high", "openrouter:moonshot/kimi-k2", "node:gaming-pc", "node:gaming-pc/qwen3@low"] {
+        for spec in ["claude:opus", "codex:gpt-6.1-sol@high", "openrouter:moonshot/kimi-k2", "openrouter:a/b:free", "node:gaming-pc", "node:gaming-pc/qwen3@low"] {
             assert_eq!(Target::parse(spec).map(|t| t.to_string()).as_deref(), Ok(spec));
         }
     }

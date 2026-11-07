@@ -109,6 +109,62 @@ pub fn drain_sse(buffer: &mut Vec<u8>) -> Vec<String> {
     out
 }
 
+const OPENROUTER_API: &str = "https://openrouter.ai/api/v1";
+
+/// True when OpenRouter accepts this key. An error means it couldn't say.
+pub async fn openrouter_accepts(key: &str) -> Result<bool, String> {
+    const UNREACHABLE: &str = "Unable to reach OpenRouter. Check your connection and try again.";
+    let response = client().get(format!("{OPENROUTER_API}/key")).bearer_auth(key).timeout(Duration::from_secs(20)).send().await.map_err(|_| UNREACHABLE)?;
+    match response.status().as_u16() {
+        200..=299 => Ok(true),
+        401 | 403 => Ok(false),
+        _ => Err(UNREACHABLE.to_string()),
+    }
+}
+
+/// One model you can pick on OpenRouter.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RouterModel {
+    pub id: String,
+    pub detail: String,
+}
+
+/// Every model on OpenRouter, newest first. The list is public, so no key is sent.
+pub async fn openrouter_models() -> Result<Vec<RouterModel>, String> {
+    const UNREACHABLE: &str = "Unable to load OpenRouter's models.";
+    let response = client().get(format!("{OPENROUTER_API}/models")).timeout(Duration::from_secs(30)).send().await.map_err(|_| UNREACHABLE)?;
+    let body: Value = response.error_for_status().map_err(|_| UNREACHABLE)?.json().await.map_err(|_| UNREACHABLE)?;
+    Ok(router_models(&body))
+}
+
+fn router_models(body: &Value) -> Vec<RouterModel> {
+    let models = body["data"].as_array().map_or(&[][..], Vec::as_slice);
+    models
+        .iter()
+        .filter_map(|model| {
+            let id = model["id"].as_str()?.to_string();
+            let mut parts = vec![router_price(&model["pricing"])];
+            parts.extend(model["name"].as_str().map(str::to_string));
+            parts.extend(model["context_length"].as_u64().filter(|size| *size > 0).map(|size| format!("{}k context", size / 1000)));
+            Some(RouterModel { id, detail: parts.join(" · ") })
+        })
+        .collect()
+}
+
+// Prices are text, in dollars per token. Routers that pick a model for you list theirs as -1.
+fn router_price(pricing: &Value) -> String {
+    let per_token = |side: &str| pricing[side].as_str().and_then(|price| price.parse::<f64>().ok());
+    let per_million = |price: f64| {
+        let dollars = price * 1_000_000.0;
+        if dollars < 0.01 { format!("${dollars:.3}") } else { format!("${dollars:.2}") }
+    };
+    match (per_token("prompt"), per_token("completion")) {
+        (Some(input), Some(output)) if input == 0.0 && output == 0.0 => "free".to_string(),
+        (Some(input), Some(output)) if input > 0.0 && output >= 0.0 => format!("{} in, {} out per million", per_million(input), per_million(output)),
+        _ => "price varies".to_string(),
+    }
+}
+
 struct Endpoint {
     url: String,
     key: String,
@@ -118,8 +174,8 @@ struct Endpoint {
 async fn endpoint(rt: &Runtime, req: &TurnRequest) -> Result<Endpoint, String> {
     match &req.target.provider {
         Provider::OpenRouter => {
-            let key = rt.config.openrouter_key().ok_or("No OpenRouter key. Set OPENROUTER_API_KEY or openrouter_key in ~/.olympus/config.toml.")?;
-            Ok(Endpoint { url: "https://openrouter.ai/api/v1/chat/completions".into(), key, model: req.target.model.clone() })
+            let key = rt.openrouter_key().ok_or("No OpenRouter key. Add one with /account add openrouter <key>.")?;
+            Ok(Endpoint { url: format!("{OPENROUTER_API}/chat/completions"), key, model: req.target.model.clone() })
         }
         Provider::Node(name) => {
             let base = node::address(&rt.config, name).await.ok_or_else(|| format!("Node '{name}' didn't answer. Check it's running on this network."))?;
@@ -296,6 +352,22 @@ async fn persist(path: &PathBuf, messages: &[Value], ephemeral: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openrouter_models_show_what_they_cost() {
+        let body = json!({"data": [
+            {"id": "a/paid", "name": "Paid", "context_length": 262144, "pricing": {"prompt": "0.0000025", "completion": "0.00001"}},
+            {"id": "a/free:free", "name": "Free", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
+            {"id": "a/tiny", "pricing": {"prompt": "0.000000006", "completion": "0.00000001"}},
+            {"name": "no id, so it can't be picked"},
+        ]});
+        let models = router_models(&body);
+        let details: Vec<&str> = models.iter().map(|model| model.detail.as_str()).collect();
+        assert_eq!(details, ["$2.50 in, $10.00 out per million · Paid · 262k context", "free · Free", "price varies", "$0.006 in, $0.01 out per million"]);
+        assert_eq!(models[1].id, "a/free:free");
+        assert!(router_models(&json!({"error": "down"})).is_empty());
+    }
 
     #[test]
     fn a_node_with_no_model_says_what_to_do_and_other_errors_keep_their_detail() {

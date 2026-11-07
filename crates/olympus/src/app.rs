@@ -127,6 +127,10 @@ pub enum AppEvent {
     Phone { chat: i64, text: String },
     /// A bot token checked out, so the connection can start.
     PhoneChecked { token: String, bot: Option<String> },
+    /// OpenRouter answered about a pasted key.
+    OpenRouterChecked { key: String, accepted: Result<bool, String> },
+    /// A review of what you said finished; `seen` is how many of the thread's messages it covered.
+    MemoryReviewed { window: u64, seen: usize, outcome: Result<olympus_core::memory::Applied, String> },
     /// Time to see whether chats should sync.
     SyncTick,
     /// A sync round finished, and the worker comes back with its results.
@@ -199,6 +203,8 @@ pub struct App {
     pub obi: crate::obiview::Obi,
     pub quit: bool,
     pub quit_armed: bool,
+    /// One memory review runs at a time.
+    pub memory_busy: bool,
     next_id: u64,
 }
 
@@ -208,7 +214,7 @@ impl App {
         let provider_lines = vec![
             (rt.claude.as_ref().map_or("Claude Code not found".to_string(), |b| format!("Claude Code {}", b.version)), rt.claude.is_some()),
             (rt.codex.as_ref().map_or("Codex not found".to_string(), |b| format!("Codex {}", b.version)), rt.codex.is_some()),
-            (if rt.config.openrouter_key().is_some() { "OpenRouter key set".to_string() } else { "OpenRouter: add a key to use it".to_string() }, rt.config.openrouter_key().is_some()),
+            commands::openrouter_line(rt.openrouter_key().is_some()),
         ];
         let mut app = Self {
             rt,
@@ -248,6 +254,7 @@ impl App {
             sessions_dir,
             quit: false,
             quit_armed: false,
+            memory_busy: false,
             next_id: 1,
         };
         let recent = session::load_all(&app.sessions_dir).into_iter().rev().take(20).rev().collect();
@@ -420,7 +427,7 @@ impl App {
         }
     }
 
-    fn save_window(&self, id: u64) {
+    pub fn save_window(&self, id: u64) {
         if let Some(Window { pane: Pane::Chat(chat), .. }) = self.windows.iter().find(|w| w.id == id) {
             // Losing one snapshot isn't worth interrupting the session; the next turn saves again.
             let _ = if crate::obiview::is_obiview(chat) { crate::obiview::save_chat(chat) } else { session::save(chat, &self.sessions_dir) };
@@ -663,6 +670,7 @@ impl App {
                     _ => chat.push(Block::Error(result.error.clone().unwrap_or_else(|| "The model hit its usage limit.".into()))),
                 }
             }
+            Stop::AuthError if target.provider == Provider::OpenRouter => chat.push(Block::Error("OpenRouter didn't accept your key. Copy a new one from openrouter.ai/keys, then run /account add openrouter <key>.".into())),
             Stop::AuthError => chat.push(Block::Error(format!("{} Open a terminal window with /claude or /codex and sign in, then try again.", result.error.clone().unwrap_or_else(|| "Sign-in failed.".into())))),
             Stop::Failed | Stop::IdleTimeout => chat.push(Block::Error(result.error.clone().unwrap_or_else(|| "The turn failed.".into()))),
         }
@@ -684,6 +692,9 @@ impl App {
             self.notify(id, result.stop == Stop::Completed, body);
             self.report_to_phone(id, &result);
             self.offer_skill(id, &result);
+            if result.stop == Stop::Completed {
+                crate::remember::after_task(self, id);
+            }
         }
         if let Some((next, prompt)) = failover {
             if let Some(chat) = self.window_mut(id).and_then(Window::chat) {
@@ -867,6 +878,8 @@ impl App {
             AppEvent::ScheduleTick => commands::run_due_schedules(self),
             AppEvent::Phone { chat, text } => commands::phone_message(self, chat, &text),
             AppEvent::PhoneChecked { token, bot } => commands::finish_phone_connect(self, token, bot),
+            AppEvent::OpenRouterChecked { key, accepted } => commands::finish_openrouter_key(self, key, accepted),
+            AppEvent::MemoryReviewed { window, seen, outcome } => crate::remember::reviewed(self, window, seen, outcome),
             AppEvent::SyncTick => commands::sync_tick(self),
             AppEvent::SyncDone(syncer, outcome) => commands::sync_done(self, syncer, outcome),
             AppEvent::SyncConnected(result) => commands::sync_connected(self, result),
@@ -1289,12 +1302,14 @@ pub(crate) mod testing {
 
     pub fn runtime(with_clis: bool) -> Arc<Runtime> {
         let bin = |name: &str| with_clis.then(|| Bin { path: PathBuf::from(name), version: "1.2.3".into() });
-        Arc::new(Runtime { config: Config::default(), claude: bin("claude"), codex: bin("codex"), limits: Arc::new(Limits::default()), learn: None, self_exe: PathBuf::from("olympus"), rules: String::new() })
+        Arc::new(Runtime { config: Config::default(), openrouter_key: Default::default(), memory_file: Default::default(), claude: bin("claude"), codex: bin("codex"), limits: Arc::new(Limits::default()), learn: None, self_exe: PathBuf::from("olympus"), rules: String::new() })
     }
 
     pub fn app(with_clis: bool) -> (App, UnboundedReceiver<AppEvent>, tempfile::TempDir) {
         let (tx, rx) = unbounded_channel();
         let dir = tempfile::tempdir().expect("tempdir");
+        // Memory stays off here, because a finished turn would otherwise start a real review.
+        std::fs::write(dir.path().join("memory-off"), "").expect("memory off");
         let app = App::new(runtime(with_clis), tx, dir.path().join("sessions"), dir.path().to_path_buf());
         (app, rx, dir)
     }

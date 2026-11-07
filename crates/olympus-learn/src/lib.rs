@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 pub use classify::classify_task;
-pub use text::is_correction;
+pub use text::{is_correction, redact};
 pub use math::{fnv1a64, weighted_tokens};
 pub use types::{
     HistoryHit, HoldoutReport, IngestProgress, IngestStats, Injection, LearnStats, Lesson,

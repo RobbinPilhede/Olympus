@@ -174,14 +174,18 @@ impl Root {
     pub(super) fn composer_view(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.app.windows.get(self.app.active);
         let running = active.is_some_and(|w| w.activity == Activity::Running);
-        let (model, full_profile, account) = match active.map(|w| &w.pane) {
+        let (model, full_profile, account, has_accounts) = match active.map(|w| &w.pane) {
             Some(Pane::Chat(chat)) => {
-                let account = if chat.state.provider() == Some(&Provider::Codex) { &chat.state.codex_account_dir } else { &chat.state.account_dir };
-                (model_label(&chat.state.choice, chat.state.last_target.as_ref()), chat.state.full_profile, account_name(account.as_deref()))
+                let provider = chat.state.provider();
+                let account = match provider {
+                    Some(Provider::OpenRouter) => "OpenRouter".to_string(),
+                    Some(Provider::Codex) => account_name(chat.state.codex_account_dir.as_deref()),
+                    _ => account_name(chat.state.account_dir.as_deref()),
+                };
+                (model_label(&chat.state.choice, chat.state.last_target.as_ref()), chat.state.full_profile, account, !matches!(provider, Some(Provider::Node(_))))
             }
-            _ => (String::new(), false, String::new()),
+            _ => (String::new(), false, String::new(), false),
         };
-        let has_accounts = model.contains("claude") || model.contains("codex") || model.starts_with("auto");
         let placeholder = if self.app.obiview_active() { "Ask Jarvis what's going on" } else if running { "Working. Type to queue the next message." } else { "Message, /command or @model" };
         let (text, runs) = self.composer_text(placeholder);
         let styled = StyledText::new(text).with_runs(runs);

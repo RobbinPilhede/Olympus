@@ -878,7 +878,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("/term", "/term [command]", "Open a terminal window", true),
     cmd("/self-improve", "/self-improve", "Open Claude Code on Olympus's own source, permissions bypassed", false),
     cmd("/sessions", "/sessions", "Reopen a past Claude or Codex session", false),
-    cmd("/account", "/account [add [chatgpt] <name>]", "Choose this chat's Claude or ChatGPT account, or sign in to another", true),
+    cmd("/account", "/account [add [chatgpt] <name> | add openrouter <key> | remove openrouter]", "Choose this chat's Claude, ChatGPT or OpenRouter account, or add another", true),
     cmd("/accounts", "/accounts", "Show which accounts are signed in", false),
     cmd("/usage", "/usage", "Show quotas, token spend and memory results", false),
     cmd("/nodes", "/nodes", "Find Olympus nodes on this network", false),
@@ -892,6 +892,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("/approve", "/approve <id>", "Let a candidate lesson be used", true),
     cmd("/reject", "/reject <id>", "Retire a lesson", true),
     cmd("/remember", "/remember <fact>", "Teach Olympus something directly", true),
+    cmd("/memory", "/memory [forget <words>|off|on]", "See or change what Olympus has learned about you", true),
     cmd("/loop", "/loop [5m] <message or /skill>|stop", "Repeat a message on a timer, or let the model pace it", true),
     cmd("/schedule", "/schedule every 1h <message>|daily 08:00 <message>|list|stop <number>", "Run something on a timetable, even after a restart", true),
     cmd("/search", "/search <words>", "Find words in your past Claude and Codex chats", true),
@@ -984,7 +985,11 @@ pub fn pick(app: &mut App, action: Action) {
         Action::NewChatOn(provider, dir) => folder_picker(app, provider, dir),
         Action::NewChatIn { provider, account, cwd } => {
             app.new_chat(cwd);
-            set_account(app, &provider, account);
+            if provider == Provider::OpenRouter {
+                openrouter_models(app);
+            } else {
+                set_account(app, &provider, account);
+            }
         }
         Action::BrowseFolder(provider, dir) => app.pending_folder = Some((provider, dir)),
         Action::BrowseSyncFolder => app.pending_sync_folder = true,
@@ -1149,6 +1154,89 @@ fn add_account(app: &mut App, provider: &Provider, name: &str) {
     }
 }
 
+/// The welcome screen's OpenRouter line.
+pub fn openrouter_line(ready: bool) -> (String, bool) {
+    (if ready { "OpenRouter key set" } else { "OpenRouter: add a key with /account" }.to_string(), ready)
+}
+
+fn key_ending(key: &str) -> String {
+    let start = key.char_indices().rev().nth(3).map_or(0, |(index, _)| index);
+    format!("key ending {}", &key[start..])
+}
+
+fn openrouter_key_arg(rest: &str) -> Option<&str> {
+    rest.trim().strip_prefix("openrouter").filter(|key| key.is_empty() || key.starts_with(char::is_whitespace)).map(str::trim)
+}
+
+fn add_openrouter_key(app: &mut App, key: &str) {
+    if key.is_empty() {
+        app.note_active("Copy a key from openrouter.ai/keys, then run /account add openrouter <key>.");
+        return;
+    }
+    app.composer.forget(key);
+    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        app.fail_active("That doesn't look like an OpenRouter key. Copy it again from openrouter.ai/keys.");
+        return;
+    }
+    app.note_active("Checking that key with OpenRouter.");
+    let (tx, key) = (app.tx.clone(), key.to_string());
+    tokio::spawn(async move {
+        let accepted = olympus_core::openai::openrouter_accepts(&key).await;
+        let _ = tx.send(AppEvent::OpenRouterChecked { key, accepted });
+    });
+}
+
+/// Saves a key once OpenRouter has accepted it. The key never appears in a message.
+pub fn finish_openrouter_key(app: &mut App, key: String, accepted: Result<bool, String>) {
+    match accepted {
+        Ok(true) => {}
+        Ok(false) => return app.fail_active("OpenRouter didn't accept that key. Copy it again from openrouter.ai/keys."),
+        Err(problem) => return app.fail_active(problem),
+    }
+    if let Err(error) = olympus_core::config::save_openrouter_key(&app.sessions_dir.with_file_name("config.toml"), Some(&key)) {
+        app.fail_active(format!("Unable to save the key: {error:#}"));
+        return;
+    }
+    app.note_active(format!("OpenRouter is connected with your {}. It's billed per use from your OpenRouter credits, and only threads you put on it use it.", key_ending(&key)));
+    app.rt.set_openrouter_key(Some(key));
+    set_openrouter_line(app);
+    openrouter_models(app);
+}
+
+fn remove_openrouter_key(app: &mut App) {
+    if let Err(error) = olympus_core::config::save_openrouter_key(&app.sessions_dir.with_file_name("config.toml"), None) {
+        app.fail_active(format!("Unable to remove the key: {error:#}"));
+        return;
+    }
+    // A default config has no saved key, so this leaves only the environment's.
+    let from_environment = olympus_core::config::Config::default().openrouter_key();
+    app.note_active(if from_environment.is_some() { "Removed the saved OpenRouter key. OPENROUTER_API_KEY is still set, so OpenRouter keeps working until you clear it." } else { "Removed the OpenRouter key from this PC." });
+    app.rt.set_openrouter_key(from_environment);
+    set_openrouter_line(app);
+}
+
+fn set_openrouter_line(app: &mut App) {
+    let ready = app.rt.openrouter_key().is_some();
+    if let Some(line) = app.provider_lines.last_mut() {
+        *line = openrouter_line(ready);
+    }
+}
+
+fn openrouter_models(app: &mut App) {
+    const TITLE: &str = "OpenRouter model";
+    if !app.rt.provider_ready(&Provider::OpenRouter) {
+        app.fail_active(NO_OPENROUTER_KEY);
+        return;
+    }
+    app.picker = Some(Picker::loading(TITLE));
+    let tx = app.tx.clone();
+    tokio::spawn(async move {
+        let models = olympus_core::openai::openrouter_models().await.unwrap_or_default();
+        let items = models.into_iter().map(|model| PickItem { detail: model.detail, action: Action::Run(format!("/model openrouter:{}", model.id)), label: model.id }).collect();
+        let _ = tx.send(AppEvent::Picker(Picker::new(TITLE, items, "Unable to load OpenRouter's models. Check your connection, or run /model openrouter:org/model.")));
+    });
+}
+
 fn choose_account(app: &mut App) {
     account_picker(app, "Accounts", false);
 }
@@ -1194,7 +1282,8 @@ fn folder_picker(app: &mut App, provider: Provider, account: Option<PathBuf>) {
 
 fn account_picker(app: &mut App, title: &'static str, new_chat: bool) {
     app.refresh_account_labels();
-    let on = thread_provider(app).filter(|provider| *provider == Provider::Codex).unwrap_or(Provider::Claude);
+    let thread = thread_provider(app);
+    let on = thread.clone().filter(|provider| *provider == Provider::Codex).unwrap_or(Provider::Claude);
     let current = app.chat().and_then(|chat| chat.state.account_on(&on).map(std::path::Path::to_path_buf));
     let (rt, tx) = (app.rt.clone(), app.tx.clone());
     app.picker = Some(Picker::loading(title));
@@ -1212,17 +1301,30 @@ fn account_picker(app: &mut App, title: &'static str, new_chat: bool) {
                 let choice = (account.dir != user_home().join(kind.folder)).then_some(account.dir);
                 let quota = if choice.is_none() { account.vendor.clone() } else { format!("{}:{name}", account.vendor) };
                 let usage = olympus_core::limits::summarize(&limits, &quota).map(|usage| usage.detail);
-                let in_use = !new_chat && provider == on && choice == current;
+                let in_use = !new_chat && thread.as_ref() == Some(&provider) && choice == current;
                 let action = if new_chat { Action::NewChatOn(provider.clone(), choice) } else { Action::UseAccount(provider.clone(), choice) };
                 PickItem { label: account_row_label(account.signed_in, &account.label, &name), detail: format!("{} · {}", kind.word, account_row_detail(account.signed_in, kind, &name, in_use, usage)), action }
             })
             .collect();
+        items.push(openrouter_row(rt.openrouter_key().as_deref(), new_chat, thread == Some(Provider::OpenRouter)));
         for provider in [Provider::Claude, Provider::Codex] {
             let kind = account_kind(&provider);
             items.push(PickItem { label: format!("Sign in to another {} account", kind.word), detail: format!("Opens the real {} sign-in in a new window", kind.cli), action: Action::AddAccount(provider) });
         }
         let _ = tx.send(AppEvent::Picker(Picker::new(title, items, "")));
     });
+}
+
+fn openrouter_row(key: Option<&str>, new_chat: bool, in_use: bool) -> PickItem {
+    let Some(key) = key else {
+        return PickItem { label: "Add an OpenRouter key".into(), detail: "Pay per use. Copy a key from openrouter.ai/keys and paste it".into(), action: Action::Prefill("/account add openrouter ".into()) };
+    };
+    let mut parts = vec!["Pay per use".to_string(), key_ending(key)];
+    if in_use && !new_chat {
+        parts.push("this thread".to_string());
+    }
+    let action = if new_chat { Action::NewChatOn(Provider::OpenRouter, None) } else { Action::Run("/model openrouter".into()) };
+    PickItem { label: "OpenRouter".into(), detail: parts.join(" · "), action }
 }
 
 // `/account add chatgpt` alone picks the next free name; a bare name follows this thread's provider.
@@ -1641,12 +1743,21 @@ fn merge(app: &mut App) {
     });
 }
 
+const NO_OPENROUTER_KEY: &str = "Add an OpenRouter key first with /account add openrouter <key>.";
+
 fn set_model(app: &mut App, spec: &str) {
+    if spec == "openrouter" {
+        openrouter_models(app);
+        return;
+    }
     if spec.is_empty() {
         let tiers = &app.rt.config.tiers;
         let mut items = vec![PickItem { label: "auto".into(), detail: "Route by task and learned results".into(), action: Action::Run("/model auto".into()) }];
         for (tier, list) in [("strong", &tiers.strong), ("standard", &tiers.standard), ("cheap", &tiers.cheap)] {
             items.extend(list.iter().map(|spec| PickItem { label: spec.clone(), detail: tier.into(), action: Action::Run(format!("/model {spec}")) }));
+        }
+        if app.rt.provider_ready(&Provider::OpenRouter) {
+            items.push(PickItem { label: "OpenRouter".into(), detail: "Choose from every model it offers".into(), action: Action::Run("/model openrouter".into()) });
         }
         app.picker = Some(Picker::new("Model", items, ""));
         return;
@@ -1657,7 +1768,7 @@ fn set_model(app: &mut App, spec: &str) {
         match app.rt.resolve(spec) {
             Ok(target) => {
                 if target.provider == Provider::OpenRouter && !app.rt.provider_ready(&target.provider) {
-                    app.fail_active("Add an OpenRouter key first: set OPENROUTER_API_KEY or openrouter_key in ~/.olympus/config.toml.");
+                    app.fail_active(NO_OPENROUTER_KEY);
                     return;
                 }
                 Choice::Fixed(target)
@@ -1752,6 +1863,7 @@ fn accounts(app: &mut App) {
         if lines.is_empty() {
             lines.push("No signed-in accounts found. Open /claude or /codex to sign in.".into());
         }
+        lines.push(rt.openrouter_key().map_or_else(|| "– openrouter · no key; add one with /account add openrouter <key>".to_string(), |key| format!("✓ openrouter · {}", key_ending(&key))));
         if let Some(bin) = &rt.claude {
             lines.push(format!("Claude Code {} at {}", bin.version, bin.path.display()));
         }
@@ -2030,13 +2142,15 @@ pub fn run(app: &mut App, line: &str) {
         "/accounts" => accounts(app),
         "/account" => match args.split_once(char::is_whitespace).unwrap_or((args, "")) {
             ("", _) => choose_account(app),
+            ("remove", "openrouter") => remove_openrouter_key(app),
+            ("add", rest) if openrouter_key_arg(rest).is_some() => add_openrouter_key(app, openrouter_key_arg(rest).unwrap_or_default()),
             ("add", rest) => {
                 let on = thread_provider(app);
                 let (provider, name) = parse_account_add(rest, on.as_ref());
                 let name = name.unwrap_or_else(|| next_account_name(&user_home(), account_kind(&provider)));
                 add_account(app, &provider, &name);
             }
-            _ => app.fail_active("Use /account to choose, or /account add [chatgpt] <name> to sign in to another."),
+            _ => app.fail_active("Use /account to choose, /account add [chatgpt] <name> to sign in to another, or /account add openrouter <key>."),
         },
         "/usage" => usage(app),
         "/nodes" => nodes(app),
@@ -2067,6 +2181,7 @@ pub fn run(app: &mut App, line: &str) {
         "/reject" => lesson_action(app, args, false),
         "/remember" if args.is_empty() => app.fail_active("Say what to remember, like /remember always use pnpm here."),
         "/remember" => remember(app, args),
+        "/memory" => crate::remember::command(app, args),
         "/notify" => notify_command(app, args),
         "/loop" => loop_command(app, args),
         "/schedule" => schedule_command(app, args),
@@ -2519,6 +2634,63 @@ mod tests {
         }
         app.handle(AppEvent::TurnDone { window: id, target, result: done() });
         assert!(app.chat().expect("chat").state.blocks.iter().any(|b| matches!(b, Block::Note(text) if text.contains("/save-skill"))));
+    }
+
+    #[tokio::test]
+    async fn an_accepted_openrouter_key_is_saved_used_and_never_shown() {
+        const KEY: &str = "sk-or-v1-testkey1234";
+        let (mut app, _rx, _dir) = app(true);
+        let config = app.sessions_dir.with_file_name("config.toml");
+        app.composer.insert(&format!("/account add openrouter {KEY}"));
+        app.submit();
+        assert!(!app.composer.history_up(), "the up arrow can't bring it back");
+        finish_openrouter_key(&mut app, KEY.into(), Ok(false));
+        assert_eq!(app.rt.openrouter_key(), None);
+        assert!(!config.exists(), "a refused key isn't saved");
+        finish_openrouter_key(&mut app, KEY.into(), Ok(true));
+        assert_eq!(app.rt.openrouter_key().as_deref(), Some(KEY));
+        assert!(std::fs::read_to_string(&config).expect("saved").contains(KEY));
+        assert_eq!(app.picker.as_ref().expect("models").title, "OpenRouter model");
+        assert!(app.provider_lines.last().expect("line").1);
+        let transcript = serde_json::to_string(&app.chat().expect("chat").state.blocks).expect("json");
+        assert!(!transcript.contains(KEY) && transcript.contains("1234"), "{transcript}");
+        enter(&mut app, "/account remove openrouter");
+        assert!(!std::fs::read_to_string(&config).expect("saved").contains(KEY));
+    }
+
+    #[tokio::test]
+    async fn the_account_list_offers_openrouter_and_moves_a_thread_onto_it() {
+        let (mut app, _rx, _dir) = app(true);
+        let add = openrouter_row(None, false, false);
+        assert!(matches!(&add.action, Action::Prefill(text) if text == "/account add openrouter "));
+        let row = openrouter_row(Some("sk-or-v1-abcd"), false, true);
+        assert_eq!(row.detail, "Pay per use · key ending abcd · this thread");
+        assert!(matches!(&row.action, Action::Run(command) if command == "/model openrouter"));
+        assert!(matches!(openrouter_row(Some("k"), true, true).action, Action::NewChatOn(Provider::OpenRouter, None)));
+        app.rt.set_openrouter_key(Some("sk-or-v1-abcd".into()));
+        enter(&mut app, "/model openrouter:a/b:free");
+        assert_eq!(app.chat().expect("chat").state.provider(), Some(&Provider::OpenRouter));
+        pick(&mut app, Action::UseAccount(Provider::Claude, None));
+        assert_eq!(app.chat().expect("chat").state.provider(), Some(&Provider::Claude), "and back again");
+    }
+
+    #[tokio::test]
+    async fn a_refused_openrouter_key_points_at_openrouter_not_at_signing_in() {
+        let (mut app, _rx, _dir) = app(true);
+        let (window, target) = (app.active_id(), Target::parse("openrouter:a/b").expect("target"));
+        let result = olympus_core::event::TurnResult::failed(olympus_core::event::Stop::AuthError, "401: nope");
+        app.handle(AppEvent::TurnDone { window, target, result });
+        assert!(matches!(last_block(&mut app), Block::Error(text) if text.contains("/account add openrouter") && !text.contains("/claude")));
+    }
+
+    #[tokio::test]
+    async fn a_new_openrouter_chat_opens_and_then_asks_which_model() {
+        let (mut app, _rx, dir) = app(true);
+        let windows = app.windows.len();
+        app.rt.set_openrouter_key(Some("sk-or-v1-abcd".into()));
+        pick(&mut app, Action::NewChatIn { provider: Provider::OpenRouter, account: None, cwd: dir.path().to_path_buf() });
+        assert_eq!(app.windows.len(), windows + 1);
+        assert_eq!(app.picker.as_ref().expect("models").title, "OpenRouter model");
     }
 
     #[tokio::test]

@@ -123,7 +123,7 @@ pub fn thread_info(app: &crate::app::App, index: usize) -> ThreadInfo {
             let provider = chat.state.provider();
             let card = thread_card(provider, provider.and_then(|p| chat.state.account_on(p)), &app.account_labels, &user_home());
             let usage = card.vendor.as_deref().and_then(|vendor| summarize(&limits, vendor));
-            let has_accounts = !matches!(provider, Some(Provider::OpenRouter | Provider::Node(_)));
+            let has_accounts = !matches!(provider, Some(Provider::Node(_)));
             let likely = if provider.is_none() { app.rt.likely_target().map(|target| target.provider) } else { None };
             (card.who, usage, model_label(&chat.state.choice, chat.state.last_target.as_ref()), has_accounts, provider_mark(provider.or(likely.as_ref())))
         }

@@ -83,9 +83,69 @@ impl Config {
     }
 }
 
+/// Saves or removes the OpenRouter key in `config.toml`, leaving the rest of the file as it is.
+pub fn save_openrouter_key(path: &Path, key: Option<&str>) -> Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let updated = with_openrouter_key(&text, key);
+    toml::from_str::<Config>(&updated).context("the updated settings wouldn't load")?;
+    // A half-written file would stop Olympus from starting.
+    let temporary = path.with_extension("toml.tmp");
+    std::fs::write(&temporary, updated).with_context(|| format!("writing {}", temporary.display()))?;
+    std::fs::rename(&temporary, path).with_context(|| format!("writing {}", path.display()))
+}
+
+// Top-level TOML keys must come before the first table, so the key goes first.
+fn with_openrouter_key(text: &str, key: Option<&str>) -> String {
+    let mut top_level = true;
+    let rest: String = text
+        .split_inclusive('\n')
+        .filter(|line| {
+            top_level = top_level && !line.trim_start().starts_with('[');
+            !(top_level && line.split('=').next().is_some_and(|name| name.trim() == "openrouter_key"))
+        })
+        .collect();
+    match key {
+        Some(key) => format!("openrouter_key = {}\n{rest}", toml::Value::String(key.to_string())),
+        None => rest,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_the_openrouter_key_keeps_everything_else_in_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let original = "# my notes\r\ndefault_target = \"auto\"\nopenrouter_key = \"old\"\n\n[nodes]\nopenrouter_key = \"host:1\"\n";
+        std::fs::write(&path, original).expect("write");
+        save_openrouter_key(&path, Some("sk-or-new")).expect("save");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("# my notes\r\n"), "{text}");
+        assert!(!text.contains("\"old\""), "{text}");
+        let config = Config::load(&path).expect("load");
+        assert_eq!(config.openrouter_key.as_deref(), Some("sk-or-new"));
+        assert_eq!(config.default_target, "auto");
+        assert_eq!(config.nodes["openrouter_key"], "host:1", "a node's name isn't the key");
+        save_openrouter_key(&path, None).expect("remove");
+        let config = Config::load(&path).expect("load");
+        assert_eq!(config.openrouter_key, None);
+        assert_eq!(config.nodes["openrouter_key"], "host:1");
+    }
+
+    #[test]
+    fn a_broken_settings_file_is_left_alone_when_saving_the_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_target = ").expect("write");
+        assert!(save_openrouter_key(&path, Some("sk-or-new")).is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "default_target = ");
+    }
 
     #[test]
     fn creates_defaults_then_keeps_user_edits() {

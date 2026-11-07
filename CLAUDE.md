@@ -37,6 +37,7 @@ The owner runs this on their own PC and network, and accessibility is not a conc
 | `crates/olympus-core/src/runtime.rs`, `target.rs`, `limits.rs`, `discovery.rs` | Routing, model targets, quotas, finding CLIs, accounts and past sessions |
 | `crates/olympus-core/src/workflow.rs`, `git.rs`, `roles.rs` | `/auto`, `/council`, `/review` |
 | `crates/olympus-core/src/mcp.rs`, `tools.rs`, `skills.rs` | The model bridge agents call, native tools, skill search and drafts |
+| `crates/olympus-core/src/memory.rs`, `crates/olympus/src/remember.rs` | Long-term memory: `memory.md`, what new sessions load, the review after each task, and `/memory` |
 | `crates/olympus-core/src/guard.rs` | The block list for catastrophic shell commands, and the hook both CLIs call (`olympus guard`) |
 | `crates/olympus-learn` | History ingest, full-text message search (`ingest/messages.rs`), lessons, routing, stored in `learn.db` |
 | `crates/olympus-node` | LAN server, downloads, model store, console |
@@ -46,7 +47,7 @@ Adding a slash command takes one row in `COMMANDS` and one arm in `run`, both in
 
 ## The owner's data
 
-Everything is in `~/.olympus`: `config.toml` (settings), `sessions/` (saved threads), `schedules.json`, `telegram.json` (holds the bot's token), `sync.json` (holds the sync code), `sync-state.json`, `skill-drafts/`, `last.json`, `learn.db`, `usage.json`, `oa-sessions/`, `mirror-on` and `mirror.json` (paired devices, as hashes), `obiview.json`, `obiview.db` (what Obiview read), `obi-icons/`, `vault/`, `obiview-chat/`, `attachments/` (deleted after 7 days), `models/whisper/`, `wt/` (worktrees), `tools/` (build tools), `crash.log` (written after a crash).
+Everything is in `~/.olympus`: `config.toml` (settings), `sessions/` (saved threads), `schedules.json`, `telegram.json` (holds the bot's token), `sync.json` (holds the sync code), `sync-state.json`, `skill-drafts/`, `last.json`, `learn.db`, `usage.json`, `memory.md`, `memory-off`, `oa-sessions/`, `mirror-on` and `mirror.json` (paired devices, as hashes), `obiview.json`, `obiview.db` (what Obiview read), `obi-icons/`, `vault/`, `obiview-chat/`, `attachments/` (deleted after 7 days), `models/whisper/`, `wt/` (worktrees), `tools/` (build tools), `crash.log` (written after a crash).
 
 When the owner reports a bug, look here first. Don't change or delete their data unless they ask. Claude's history is in `~/.claude/projects`, and earlier Olympus sessions from this folder can be read there.
 
@@ -115,9 +116,12 @@ cargo test -p olympus-core --test live -- --ignored
 - `learn.db`'s schema version rises with new migrations, and an older Olympus refuses a newer file. So going back to an older build disables its learning store.
 - Sync's worker never writes saved chats. It returns them, and the interface saves them before the next round, so `sync_done` applying results before returning the worker matters. `Syncer` compares file hashes, so a saved chat must be byte-for-byte `serde_json::to_string(&state)`.
 - A store's record can arrive before its transcript, because cloud apps upload files in any order. That round leaves the record unread and looks again.
+- The OpenRouter key lives in `Runtime::openrouter_key`, not `Config`, so `/account add openrouter` works without a restart. It's written to `config.toml` by editing only its own line, which keeps the owner's comments.
 - Sending a picture to a node returned an empty reply. Node vision doesn't work yet.
 - Jarvis turns and `/obiview summaries` are `Access::ReadOnly` on purpose, and Olympus writes their notes after `knowledge_rel` checks the title. What they read includes strangers' mail, which can carry prompt injection. Don't give them full access to let them write.
 - `jarvis::decide` never hands the model's wording to a full-access thread by itself. A task runs on the owner's own spoken words, or on the model's wording only after it's been said aloud and the owner said yes. What Jarvis reads can contain prompt injection, so don't shortcut this.
+- A memory review only ever sees the owner's own messages (`remember::new_words`), never model replies or Obiview's text, and `memory::allowed` refuses lines that read like orders. Memory loads into every future session, so a planted line would be permanent. Don't widen what it reads without an approval step.
+- `testing::app` starts with memory off, because `bin("claude")` can resolve to the real CLI and a finished turn would spend quota on a review.
 - The Obiview chat is saved in `obiview-chat/`, not `sessions/`, so sync never copies captured text to other PCs.
 - The phone page gets its transcript from `block_parts`, the same as the desktop, and its colors from `theme::css()`. Change those rather than restyling one side.
 - Obiview is pinned by `obiview::start`, called from the GUI rather than `App::new`, so unit tests keep their usual window indexes. It shifts sidebar rows down by 57px, which is why `e2e.rs` clicks where it does.

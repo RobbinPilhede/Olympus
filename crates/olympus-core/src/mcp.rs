@@ -198,7 +198,7 @@ mod tests {
     use crate::limits::Limits;
 
     fn runtime() -> Arc<Runtime> {
-        Arc::new(Runtime { config: Config::default(), claude: None, codex: None, limits: Arc::new(Limits::default()), learn: None, self_exe: "olympus".into(), rules: String::new() })
+        Arc::new(Runtime { config: Config::default(), openrouter_key: Default::default(), memory_file: Default::default(), claude: None, codex: None, limits: Arc::new(Limits::default()), learn: None, self_exe: "olympus".into(), rules: String::new() })
     }
 
     #[tokio::test]

@@ -9,6 +9,8 @@ use olympus_core::proc::cancel_pair;
 use serde::Deserialize;
 
 const TALK_MODELS: [&str; 2] = ["haiku", "codex"];
+/// Starts every task Jarvis hands to a thread.
+pub const TASK_PREFIX: &str = "I said this out loud to my assistant.";
 const SHOWN_CHARS: usize = 32;
 const SPOKEN_RESULT_CHARS: usize = 220;
 const MOST_ANSWER_WORDS: usize = 4;
@@ -163,7 +165,6 @@ pub fn heard(app: &mut App, spoken: &str) {
         let mut request = TurnRequest::new(target, talk_prompt(&spoken, &read), root);
         request.access = Access::ReadOnly;
         request.ephemeral = true;
-        request.use_memory = false;
         let (_keep, cancel) = cancel_pair();
         let result = run_turn(&rt, &request, cancel, &mut |_| {}).await;
         let outcome = if result.ok() { Ok(parse_plan(&result.text)) } else { Err(result.error.unwrap_or_else(|| "The model failed.".to_string())) };
@@ -192,6 +193,9 @@ pub fn answered(app: &mut App, spoken: &str, outcome: Result<Plan, String>) {
     if let Some(words) = decision.run {
         run_task(app, &words);
     }
+    if let Some(id) = pinned_chat_id(app) {
+        crate::remember::after_task(app, id);
+    }
 }
 
 fn run_task(app: &mut App, words: &str) {
@@ -205,7 +209,7 @@ fn run_task(app: &mut App, words: &str) {
     // You're probably in another app, and a new thread mustn't pull Olympus's view away either.
     app.active = active;
     app.obi.voice_tasks.push(id);
-    app.send(id, format!("I said this out loud to my assistant. Do it on this computer now, then end with one short sentence saying what you did: {words}"));
+    app.send(id, format!("{TASK_PREFIX} Do it on this computer now, then end with one short sentence saying what you did: {words}"));
 }
 
 /// A task finished, so say how it went.

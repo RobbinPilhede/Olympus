@@ -92,6 +92,11 @@ impl Composer {
         text
     }
 
+    /// Drops anything from history holding this text, so a secret can't be recalled with the up arrow.
+    pub fn forget(&mut self, text: &str) {
+        self.history.retain(|line| !line.contains(text));
+    }
+
     /// Deletes the character before the cursor.
     pub fn backspace(&mut self) {
         if self.delete_selection() {

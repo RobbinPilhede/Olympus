@@ -10,6 +10,7 @@ pub mod git;
 pub mod guard;
 pub mod limits;
 pub mod mcp;
+pub mod memory;
 pub mod node;
 pub mod openai;
 pub mod proc;

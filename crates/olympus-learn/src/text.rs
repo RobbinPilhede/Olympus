@@ -48,7 +48,8 @@ pub(crate) fn truncate(text: &str, max: usize) -> &str {
     }
 }
 
-pub(crate) fn redact(text: &str) -> String {
+/// Masks anything that looks like a credential.
+pub fn redact(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find(is_token_char) {

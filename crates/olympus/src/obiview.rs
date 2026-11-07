@@ -1264,7 +1264,6 @@ pub fn ask_jarvis(app: &mut App, question: &str) {
         let mut request = TurnRequest::new(target, prompt, root);
         request.access = Access::ReadOnly;
         request.ephemeral = true;
-        request.use_memory = false;
         request.account_dir = account;
         let (_keep, cancel) = cancel_pair();
         let result = run_turn(&rt, &request, cancel, &mut |_| {}).await;
