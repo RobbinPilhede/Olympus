@@ -1,4 +1,4 @@
-use super::{control, live_mark, logo, Root, CLAUDE_MARK, OPENAI_MARK};
+use super::{control, icon_control, live_mark, logo, Root, CLAUDE_MARK, HISTORY_ICON, NETWORK_ICON, OPENAI_MARK, SEARCH_ICON, TERMINAL_ICON, WRENCH_ICON};
 use crate::session::{account_name, Activity, Choice, Pane, Window as OWindow};
 use crate::theme;
 use gpui::prelude::*;
@@ -101,6 +101,51 @@ pub fn model_label(choice: &Choice, last_target: Option<&olympus_core::target::T
         (Choice::Auto, Some(target)) => format!("auto · {target}"),
         _ => choice.label(),
     }
+}
+
+/// What a thread's card shows, for the sidebar and the phone page alike.
+pub struct ThreadInfo {
+    pub who: String,
+    pub details: Vec<String>,
+    pub used: Option<f32>,
+    pub alert: bool,
+    pub mark: Option<&'static str>,
+    pub has_accounts: bool,
+}
+
+/// Works out a thread's card.
+pub fn thread_info(app: &crate::app::App, index: usize) -> ThreadInfo {
+    let window = &app.windows[index];
+    let limits = app.rt.limits.snapshot();
+    let (who, usage, model, has_accounts, mark): (String, Option<UsageSummary>, String, bool, Option<&'static str>) = match &window.pane {
+        Pane::Chat(chat) if crate::obiview::is_obiview(chat) => (app.obi.status_line(), None, String::new(), false, Some(super::JARVIS_MARK)),
+        Pane::Chat(chat) => {
+            let provider = chat.state.provider();
+            let card = thread_card(provider, provider.and_then(|p| chat.state.account_on(p)), &app.account_labels, &user_home());
+            let usage = card.vendor.as_deref().and_then(|vendor| summarize(&limits, vendor));
+            let has_accounts = !matches!(provider, Some(Provider::OpenRouter | Provider::Node(_)));
+            let likely = if provider.is_none() { app.rt.likely_target().map(|target| target.provider) } else { None };
+            (card.who, usage, model_label(&chat.state.choice, chat.state.last_target.as_ref()), has_accounts, provider_mark(provider.or(likely.as_ref())))
+        }
+        Pane::Term(term) => ("Terminal".to_string(), None, String::new(), false, terminal_mark(&term.title)),
+    };
+    let state_word = match window.activity {
+        Activity::Running => "working",
+        Activity::Unseen => "finished",
+        Activity::Failed => "failed",
+        Activity::Idle => "",
+    };
+    let alert = usage.as_ref().is_some_and(|u| u.alert);
+    let used = usage.as_ref().map(|u| u.used);
+    let looping = match &window.pane {
+        Pane::Chat(chat) => match chat.running_elsewhere() {
+            Some(device) => format!("running on {device}"),
+            None => chat.looping.as_ref().map_or_else(String::new, crate::session::Loop::label),
+        },
+        Pane::Term(_) => String::new(),
+    };
+    let details = [state_word.to_string(), looping, usage.map_or_else(String::new, |u| u.detail), model].into_iter().filter(|part| !part.is_empty()).collect();
+    ThreadInfo { who, details, used, alert, mark, has_accounts }
 }
 
 fn caption_button(id: &'static str, glyph: &'static str, area: WindowControlArea, danger: bool) -> impl IntoElement {
@@ -243,31 +288,7 @@ impl Root {
     fn thread_row(&self, index: usize, window: &OWindow, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = index == self.app.active;
         let title: SharedString = window.title().to_string().into();
-        let limits = self.app.rt.limits.snapshot();
-        let (who, usage, model, has_accounts, mark): (String, Option<UsageSummary>, String, bool, Option<&'static str>) = match &window.pane {
-            Pane::Chat(chat) => {
-                let provider = chat.state.provider();
-                let card = thread_card(provider, provider.and_then(|p| chat.state.account_on(p)), &self.app.account_labels, &user_home());
-                let usage = card.vendor.as_deref().and_then(|vendor| summarize(&limits, vendor));
-                let has_accounts = !matches!(provider, Some(Provider::OpenRouter | Provider::Node(_)));
-                let likely = if provider.is_none() { self.app.rt.likely_target().map(|target| target.provider) } else { None };
-                (card.who, usage, model_label(&chat.state.choice, chat.state.last_target.as_ref()), has_accounts, provider_mark(provider.or(likely.as_ref())))
-            }
-            Pane::Term(term) => ("Terminal".to_string(), None, String::new(), false, terminal_mark(&term.title)),
-        };
-        let state_word = match window.activity {
-            Activity::Running => "working",
-            Activity::Unseen => "finished",
-            Activity::Failed => "failed",
-            Activity::Idle => "",
-        };
-        let alert = usage.as_ref().is_some_and(|u| u.alert);
-        let used = usage.as_ref().map(|u| u.used);
-        let looping = match &window.pane {
-            Pane::Chat(chat) => chat.looping.as_ref().map_or_else(String::new, crate::session::Loop::label),
-            Pane::Term(_) => String::new(),
-        };
-        let details: Vec<String> = [state_word.to_string(), looping, usage.map_or_else(String::new, |u| u.detail), model].into_iter().filter(|part| !part.is_empty()).collect();
+        let ThreadInfo { who, details, used, alert, mark, has_accounts } = thread_info(&self.app, index);
         let group = SharedString::from(format!("thread-{index}"));
         let lifted = self.dragged_thread.filter(|_| cx.has_active_drag()) == Some(window.id);
         let ghost_title = title.clone();
@@ -387,6 +408,7 @@ impl Root {
 
     pub(super) fn sidebar_view(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let rows: Vec<AnyElement> = (0..self.app.windows.len())
+            .filter(|index| !matches!(&self.app.windows[*index].pane, Pane::Chat(chat) if crate::obiview::is_obiview(chat)))
             .map(|index| {
                 let row = {
                     let window = &self.app.windows[index];
@@ -404,6 +426,7 @@ impl Root {
             .bg(theme::surface())
             .border_r_1()
             .border_color(theme::line())
+            .child(self.obi_row(cx))
             .child(
                 div().flex().flex_none().items_center().justify_between().h(px(36.)).pl(px(14.)).pr(px(8.)).child(div().text_size(px(12.)).text_color(theme::dim()).child("Threads")).child(
                     control("new-chat", "+ New", theme::accent()).on_click(cx.listener(|root, _, _, cx| {
@@ -435,18 +458,24 @@ impl Root {
                     .p(px(8.))
                     .border_t_1()
                     .border_color(theme::line())
-                    .child(control("open-terminal", "Terminal  Alt+T", theme::dim()).on_click(cx.listener(|root, _, _, cx| root.run_command("/term", cx))))
-                    .child(control("open-sessions", "Past sessions", theme::dim()).on_click(cx.listener(|root, _, _, cx| root.run_command("/sessions", cx))))
-                    .child(control("open-nodes", "Network models", theme::dim()).on_click(cx.listener(|root, _, _, cx| root.run_command("/nodes", cx))))
-                    .child(control("open-palette", "Find anything  Alt+K", theme::dim()).on_click(cx.listener(|root, _, _, cx| {
-                        root.app.picker = Some(crate::commands::palette(&root.app));
-                        cx.notify();
-                    })))
-                    .child(control("self-improve", "Self-improve", theme::dim()).on_click(cx.listener(|root, _, _, cx| root.run_command("/self-improve", cx)))),
+                    .child(self.mirror_switch(cx))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(2.))
+                            .child(icon_control("open-terminal", TERMINAL_ICON, "Terminal  Alt+T").on_click(cx.listener(|root, _, _, cx| root.run_command("/term", cx))))
+                            .child(icon_control("open-sessions", HISTORY_ICON, "Past sessions").on_click(cx.listener(|root, _, _, cx| root.run_command("/sessions", cx))))
+                            .child(icon_control("open-nodes", NETWORK_ICON, "Network models").on_click(cx.listener(|root, _, _, cx| root.run_command("/nodes", cx))))
+                            .child(icon_control("open-palette", SEARCH_ICON, "Find anything  Alt+K").on_click(cx.listener(|root, _, _, cx| {
+                                root.app.picker = Some(crate::commands::palette(&root.app));
+                                cx.notify();
+                            })))
+                            .child(icon_control("self-improve", WRENCH_ICON, "Self-improve").on_click(cx.listener(|root, _, _, cx| root.run_command("/self-improve", cx)))),
+                    ),
             )
     }
 
-    pub(super) fn footer(&self, width: f32, show_meters: bool) -> impl IntoElement {
+    pub(super) fn footer(&mut self, width: f32, show_meters: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let hints: &[&str] = if self.app.active_is_chat() {
             &["Enter send", "Ctrl+J new line", "Esc stop", "Alt+K find", "Alt+D changes", "Alt+1-9 switch", "Alt+G grid", "Alt+W close"]
         } else {
@@ -500,6 +529,7 @@ impl Root {
             .border_color(theme::line())
             .text_size(px(12.))
             .text_color(theme::dim())
+            .when(show_meters, |el| el.child(self.mirror_switch(cx)))
             .child(div().min_w_0().whitespace_nowrap().overflow_hidden().child(shown))
             .child(
                 div()

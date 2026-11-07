@@ -22,7 +22,6 @@ const NEUTRAL: f32 = 265.0;
 macro_rules! tokens {
     ($($(#[$doc:meta])* $name:ident = ($l:expr, $c:expr, $h:expr);)*) => {
         $($(#[$doc])* pub fn $name() -> Hsla { oklch($l, $c, $h) })*
-        #[cfg(test)]
         const ALL: &[(&str, (f32, f32, f32))] = &[$((stringify!($name), ($l, $c, $h))),*];
     };
 }
@@ -52,6 +51,12 @@ tokens! {
     red = (0.74, 0.16, 25.0);
     /// Only for the Claude mark.
     claude = (0.676, 0.13, 39.0);
+}
+
+/// The same tokens as CSS variables, so the phone page can't drift from the app.
+pub fn css() -> String {
+    let tokens: String = ALL.iter().map(|(name, (l, c, h))| format!("--{name}:oklch({l} {c} {h});")).collect();
+    format!(":root{{{tokens}}}")
 }
 
 /// A translucent version of a token, for row tints.

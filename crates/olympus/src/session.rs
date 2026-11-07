@@ -16,6 +16,7 @@ pub const NEW_CHAT_TITLE: &str = "New chat";
 const CLOSED_FOLDER: &str = "closed";
 const ORDER_FILE: &str = "order.txt";
 const MAX_CLOSED: usize = 50;
+const MAX_TOUCHES: usize = 512;
 
 /// How a running tool call finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +91,9 @@ pub struct ChatState {
     /// The Codex home folder this chat signs in with; None is the normal `~/.codex`.
     #[serde(default)]
     pub codex_account_dir: Option<PathBuf>,
+    /// The provider has no memory of this chat here, so the next message brings the recent history along.
+    #[serde(default)]
+    pub carry_context: bool,
     pub blocks: Vec<Block>,
 }
 
@@ -164,6 +168,12 @@ pub struct Chat {
     pub follow: bool,
     /// The first block changed since the interface last looked.
     pub dirty_from: Option<usize>,
+    /// Counts changes to the transcript, so syncing can tell when there's something new.
+    pub revision: u64,
+    /// Which block each recent revision changed, so an open page fetches only those.
+    touches: VecDeque<(u64, usize)>,
+    /// The other PC running this chat, and when that was last heard.
+    pub elsewhere: Option<(String, Instant)>,
     pub file_id: String,
 }
 
@@ -171,12 +181,12 @@ impl Chat {
     /// Creates an empty chat.
     pub fn new(title: String, cwd: PathBuf, choice: Choice) -> Self {
         let file_id = format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
-        Self::restore(ChatState { title, cwd, choice, last_target: None, vendor_session: None, full_profile: false, usage: Usage::default(), last_branch: None, account_dir: None, codex_account_dir: None, blocks: Vec::new() }, file_id)
+        Self::restore(ChatState { title, cwd, choice, last_target: None, vendor_session: None, full_profile: false, usage: Usage::default(), last_branch: None, account_dir: None, codex_account_dir: None, carry_context: false, blocks: Vec::new() }, file_id)
     }
 
     /// Rebuilds a chat from saved state.
     pub fn restore(state: ChatState, file_id: String) -> Self {
-        Self { state, pending_run: None, queue: VecDeque::new(), cancel: None, last_prompt: String::new(), failed_over: false, looping: None, reply_to_phone: false, follow: false, dirty_from: Some(0), file_id }
+        Self { state, pending_run: None, queue: VecDeque::new(), cancel: None, last_prompt: String::new(), failed_over: false, looping: None, reply_to_phone: false, follow: false, dirty_from: Some(0), revision: 0, touches: VecDeque::new(), elsewhere: None, file_id }
     }
 
     /// True until a message or `/rename` gives the chat a topic; older chats were titled after their folder.
@@ -191,7 +201,24 @@ impl Chat {
 
     /// Notes that a block changed, so the interface redraws it and everything after it.
     pub fn touch(&mut self, index: usize) {
+        self.revision += 1;
         self.dirty_from = Some(self.dirty_from.map_or(index, |from| from.min(index)));
+        self.touches.push_back((self.revision, index));
+        if self.touches.len() > MAX_TOUCHES {
+            self.touches.pop_front();
+        }
+    }
+
+    /// The first block that changed after a revision; 0 when that revision is too old or from before a restart.
+    pub fn changed_since(&self, revision: u64) -> usize {
+        if revision == self.revision {
+            return self.state.blocks.len();
+        }
+        let known = revision < self.revision && self.touches.front().is_some_and(|(oldest, _)| *oldest <= revision + 1);
+        if !known {
+            return 0;
+        }
+        self.touches.iter().filter(|(at, _)| *at > revision).map(|(_, index)| *index).min().unwrap_or(0)
     }
 
     /// Adds a block, dropping the oldest past the cap so long sessions keep a bounded footprint.
@@ -243,6 +270,28 @@ impl Chat {
         if !streamed && !text.is_empty() {
             self.push(Block::Assistant { label: None, text: text.to_string() });
         }
+    }
+
+    /// Adds the recent history to a message if the provider has no memory of this chat here.
+    pub fn with_carried_context(&mut self, prompt: String) -> String {
+        // A skill's name has to stay first in its message, so that one waits for the next plain message.
+        if !self.state.carry_context || prompt.starts_with('/') {
+            return prompt;
+        }
+        self.state.carry_context = false;
+        let handoff = self.handoff(12_000);
+        format!("You are continuing a conversation from another computer. The model has no other record of it.\n\nRecent conversation:\n{handoff}\n\nContinue with the user's latest message.")
+    }
+
+    /// The other PC this chat is running on right now.
+    pub fn running_elsewhere(&self) -> Option<&str> {
+        self.elsewhere.as_ref().filter(|(_, heard)| crate::sync::is_fresh(*heard)).map(|(device, _)| device.as_str())
+    }
+
+    /// Changes whenever this chat has something new worth saving for other PCs.
+    pub fn sync_key(&self) -> String {
+        let state = &self.state;
+        format!("{}|{:?}|{:?}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}", state.title, state.cwd, state.choice, state.last_target, state.vendor_session, state.full_profile, state.usage, state.last_branch, state.account_dir, state.codex_account_dir, state.carry_context, self.revision)
     }
 
     /// A recent-history digest for handing work to another model.

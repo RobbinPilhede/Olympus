@@ -12,6 +12,7 @@ const HOLD_MS: u32 = 250;
 const DOUBLE_TAP_MS: u32 = 300;
 const VK_V: u16 = 0x56;
 const VK_C: u16 = 0x43;
+const VK_B: u16 = 0x42;
 // Marks our own replays; other injected keys are real typing from tools like Parsec.
 const OWN_INPUT: usize = 0x4F4C_594D;
 
@@ -27,14 +28,15 @@ pub fn set_enabled(enabled: bool) {
 pub enum Chord {
     Voice,
     Shot,
+    Jarvis,
 }
 
 /// A chord starting or ending, sent to whoever handles it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Start(Chord),
-    /// Dictation that keeps running without holding anything, until the chord is pressed again.
-    StartLocked,
+    /// Listening that keeps running without holding anything, until the chord is pressed again.
+    StartLocked(Chord),
     Stop(Chord),
 }
 
@@ -83,7 +85,7 @@ enum Wait {
 pub struct Machine {
     waiting: Option<Wait>,
     held: Option<(u16, Chord)>,
-    locked: bool,
+    locked: Option<u16>,
     // After a chord the key may still be down, and must not start typing lowercase.
     draining: Option<u16>,
 }
@@ -92,6 +94,7 @@ fn chord_of(vk: u16) -> Option<Chord> {
     match vk {
         VK_V => Some(Chord::Voice),
         VK_C => Some(Chord::Shot),
+        VK_B => Some(Chord::Jarvis),
         _ => None,
     }
 }
@@ -122,11 +125,12 @@ impl Machine {
             Some(Wait::Second(pending)) if vk == pending && chord_press => {
                 self.waiting = None;
                 self.draining = Some(vk);
-                let signal = if chord_of(vk) == Some(Chord::Voice) {
-                    self.locked = true;
-                    Signal::StartLocked
-                } else {
-                    Signal::Start(Chord::Shot)
+                let signal = match chord_of(vk) {
+                    Some(chord) if chord != Chord::Shot => {
+                        self.locked = Some(vk);
+                        Signal::StartLocked(chord)
+                    }
+                    _ => Signal::Start(Chord::Shot),
                 };
                 return Decision { swallow: true, disarm_timer: true, signal: Some(signal), ..Decision::default() };
             }
@@ -157,10 +161,10 @@ impl Machine {
             }
             return Decision::default();
         }
-        if self.locked && vk == VK_V && chord_press {
-            self.locked = false;
+        if let Some(chord) = chord_of(vk).filter(|_| self.locked == Some(vk) && chord_press) {
+            self.locked = None;
             self.draining = Some(vk);
-            return Decision { swallow: true, signal: Some(Signal::Stop(Chord::Voice)), ..Decision::default() };
+            return Decision { swallow: true, signal: Some(Signal::Stop(chord)), ..Decision::default() };
         }
         if chord_press && chord_of(vk).is_some() {
             self.waiting = Some(Wait::Press(vk));
@@ -375,7 +379,7 @@ mod tests {
     fn a_double_tap_of_v_locks_dictation_on_until_pressed_again() {
         let mut m = Machine::default();
         tap(&mut m, VK_V);
-        assert_eq!(m.key(VK_V, true, SHIFT).signal, Some(Signal::StartLocked));
+        assert_eq!(m.key(VK_V, true, SHIFT).signal, Some(Signal::StartLocked(Chord::Voice)));
         assert!(m.key(VK_V, false, SHIFT).swallow);
         assert_eq!(m.key(VK_LSHIFT, false, NONE), Decision::default(), "letting go of Shift doesn't stop it");
         assert_eq!(m.timer(), Expired::Nothing);
@@ -384,6 +388,24 @@ mod tests {
         assert!(stop.swallow);
         assert!(m.key(VK_V, false, SHIFT).swallow);
         assert_eq!(m.key(VK_V, true, NONE), Decision::default(), "v types normally afterwards");
+    }
+
+    #[test]
+    fn shift_b_talks_to_jarvis_held_or_locked_and_a_tap_still_types_a_capital() {
+        let mut m = Machine::default();
+        assert!(m.key(VK_B, true, SHIFT).swallow);
+        assert_eq!(m.timer(), Expired::Signal(Signal::Start(Chord::Jarvis)));
+        assert_eq!(m.key(VK_B, false, SHIFT).signal, Some(Signal::Stop(Chord::Jarvis)));
+        let mut m = Machine::default();
+        m.key(VK_B, true, SHIFT);
+        m.key(VK_B, false, SHIFT);
+        assert_eq!(m.key(VK_B, true, SHIFT).signal, Some(Signal::StartLocked(Chord::Jarvis)));
+        m.key(VK_B, false, SHIFT);
+        assert_eq!(m.key(VK_B, true, SHIFT).signal, Some(Signal::Stop(Chord::Jarvis)));
+        let mut m = Machine::default();
+        m.key(VK_B, true, SHIFT);
+        m.key(VK_B, false, SHIFT);
+        assert_eq!(m.timer(), Expired::Replay(VK_B));
     }
 
     #[test]

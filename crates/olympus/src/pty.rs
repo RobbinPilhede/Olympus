@@ -3,13 +3,15 @@ use crate::input::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// A real terminal running in a pane.
 pub struct PtyPane {
     pub parser: Arc<Mutex<vt100::Parser>>,
     pub exited: Arc<AtomicBool>,
+    /// Counts bursts of output, so an open page knows when to fetch the screen again.
+    pub output: Arc<AtomicU64>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
@@ -41,6 +43,8 @@ impl PtyPane {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 2000)));
         let exited = Arc::new(AtomicBool::new(false));
         let out_parser = parser.clone();
+        let output = Arc::new(AtomicU64::new(0));
+        let out_count = output.clone();
         let wake = Arc::new(wake);
         let (wait_exited, wait_wake) = (exited.clone(), wake.clone());
         // ConPTY keeps the output pipe open after the program ends, so only waiting on it reveals the exit.
@@ -58,10 +62,11 @@ impl PtyPane {
                 if let Ok(mut parser) = out_parser.lock() {
                     parser.process(&buffer[..n]);
                 }
+                out_count.fetch_add(1, Ordering::Relaxed);
                 wake();
             }
         });
-        Ok(PtyPane { parser, exited, master: pair.master, writer, killer, size: (rows, cols) })
+        Ok(PtyPane { parser, exited, output, master: pair.master, writer, killer, size: (rows, cols) })
     }
 
     /// Matches the pane to its on-screen size.

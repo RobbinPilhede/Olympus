@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/olympus-learn", "crates/olympus-core", "crates/olympus", "crates/olympus-node"]
+members = ["crates/olympus-learn", "crates/olympus-core", "crates/olympus", "crates/olympus-node", "crates/olympus-obi"]
 exclude = ["vendor/infr"]
 
 [workspace.package]
@@ -11,6 +11,7 @@ license = "MIT"
 [workspace.dependencies]
 olympus-learn = { path = "crates/olympus-learn" }
 olympus-core = { path = "crates/olympus-core" }
+olympus-obi = { path = "crates/olympus-obi" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

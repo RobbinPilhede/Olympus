@@ -145,15 +145,15 @@ fn dragging_a_thread_up_the_list_reorders_it_and_is_remembered() {
     app.line("/help");
     app.line("/rename dragged-up");
     let at = |y: isize| (y << 16) | 100;
-    app.post(WM_MOUSEMOVE, 0, at(166));
+    app.post(WM_MOUSEMOVE, 0, at(223));
     std::thread::sleep(Duration::from_millis(300));
-    app.post(WM_LBUTTONDOWN, 1, at(166));
-    for y in [160, 140, 120, 100, 85] {
+    app.post(WM_LBUTTONDOWN, 1, at(223));
+    for y in [217, 197, 177, 157, 142] {
         std::thread::sleep(Duration::from_millis(100));
         app.post(WM_MOUSEMOVE, 1, at(y));
     }
     std::thread::sleep(Duration::from_millis(200));
-    app.post(WM_LBUTTONUP, 0, at(85));
+    app.post(WM_LBUTTONUP, 0, at(142));
     std::thread::sleep(Duration::from_millis(300));
     app.line("/quit");
     assert!(app.wait_for_exit().success());
@@ -170,7 +170,7 @@ fn the_close_button_on_a_thread_closes_it_and_reopen_brings_it_back() {
     let mut app = App::start(home.path(), cwd.path());
     app.line("/help");
     app.line("/rename close-me");
-    let position = (96isize << 16) | 226;
+    let position = (153isize << 16) | 226;
     app.post(WM_MOUSEMOVE, 0, position);
     std::thread::sleep(Duration::from_millis(300));
     app.post(WM_LBUTTONDOWN, 1, position);

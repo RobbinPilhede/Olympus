@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 base64 = "0.22"
 olympus-learn.workspace = true
+olympus-obi.workspace = true
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

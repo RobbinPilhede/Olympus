@@ -439,6 +439,285 @@ pub fn finish_phone_connect(app: &mut App, token: String, bot: Option<String>) {
     app.note_active(format!("Connected to @{bot}. To link your phone, send it this code: {code}. After that, only your chat can reach Olympus."));
 }
 
+fn sync_layout(app: &App) -> crate::sync::Layout {
+    crate::sync::Layout { user_home: user_home(), olympus_home: app.sessions_dir.parent().map_or_else(home_dir, Path::to_path_buf) }
+}
+
+/// Reconnects at launch if sync was set up before; a store that's away shows up on the first round.
+pub fn resume_sync(app: &mut App) {
+    let Some(settings) = crate::sync::Settings::load(&app.sessions_dir.with_file_name(crate::sync::SETTINGS_FILE)) else { return };
+    let syncer = crate::sync::Syncer::new(crate::sync::open_store(&settings.place), sync_layout(app), &settings);
+    app.sync = Some(crate::sync::Link::new(syncer, settings));
+}
+
+/// Wakes syncing every few seconds, which then decides whether a round is due.
+pub fn start_sync_clock(tx: tokio::sync::mpsc::UnboundedSender<AppEvent>) {
+    tokio::spawn(async move {
+        let mut clock = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            clock.tick().await;
+            if tx.send(AppEvent::SyncTick).is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// Starts a sync round if one is due and none is running.
+pub fn sync_tick(app: &mut App) {
+    let Some(link) = app.sync.as_mut() else { return };
+    if link.last_round.is_some_and(|last| last.elapsed() < link.settings.every()) {
+        return;
+    }
+    let Some(mut syncer) = link.syncer.take() else { return };
+    link.last_round = Some(std::time::Instant::now());
+    let mut open = Vec::new();
+    for window in &app.windows {
+        let Pane::Chat(chat) = &window.pane else { continue };
+        if chat.state.blocks.is_empty() || crate::obiview::is_obiview(chat) {
+            continue;
+        }
+        let key = chat.sync_key();
+        if link.keys.get(&chat.file_id) != Some(&key) && crate::session::save(chat, &app.sessions_dir).is_ok() {
+            link.keys.insert(chat.file_id.clone(), key);
+        }
+        open.push(crate::sync::Open { id: chat.file_id.clone(), running: window.activity == Activity::Running });
+    }
+    let closed = std::mem::take(&mut app.sync_closed);
+    let tx = app.tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let outcome = syncer.cycle(&open, closed);
+        let _ = tx.send(AppEvent::SyncDone(syncer, outcome));
+    });
+}
+
+const SYNC_PAUSED: &str = "Sync paused: ";
+
+fn add_synced_chat(app: &mut App, id: String, state: crate::session::ChatState) {
+    let _ = std::fs::remove_file(app.sessions_dir.join("closed").join(format!("{id}.json")));
+    let chat = Chat::restore(state, id);
+    // If this fails, the next sync round still has the chat to save.
+    let _ = crate::session::save(&chat, &app.sessions_dir);
+    let focused = app.active;
+    let window = app.add_window(Pane::Chat(Box::new(chat)));
+    app.active = focused;
+    if let Some(window) = app.window_mut(window) {
+        window.activity = Activity::Unseen;
+    }
+}
+
+fn apply_incoming(app: &mut App, incoming: crate::sync::Incoming) {
+    use crate::sync::Incoming;
+    let focused = app.active_id();
+    match incoming {
+        Incoming::Copy { id, state } => add_synced_chat(app, id, *state),
+        Incoming::Apply { id, state, expected, running_on, copy, copy_id } => {
+            let found = app.windows.iter_mut().find(|window| matches!(&window.pane, Pane::Chat(chat) if chat.file_id == id));
+            let Some(window) = found else {
+                add_synced_chat(app, id.clone(), *state);
+                if let Some(window) = app.windows.last_mut() {
+                    if running_on.is_some() {
+                        window.activity = Activity::Idle;
+                    }
+                    if let Some(chat) = window.chat() {
+                        chat.elsewhere = running_on.map(|device| (device, std::time::Instant::now()));
+                    }
+                }
+                return;
+            };
+            let (window_id, running) = (window.id, window.activity == Activity::Running);
+            let Some(chat) = window.chat() else { return };
+            // You typed or started something during the round, so neither version may be lost.
+            if running || crate::sync::state_sha(&chat.state) != expected {
+                add_synced_chat(app, copy_id, *copy);
+                return;
+            }
+            // It's only news once it has stopped; until then the card says where it's running.
+            let news = running_on.is_none() && (chat.elsewhere.is_some() || state.blocks.len() != chat.state.blocks.len());
+            chat.state = *state;
+            chat.pending_run = None;
+            chat.elsewhere = running_on.map(|device| (device, std::time::Instant::now()));
+            chat.touch(0);
+            chat.follow = window_id == focused;
+            let _ = crate::session::save(chat, &app.sessions_dir);
+            let started_elsewhere = chat.elsewhere.is_some();
+            if let Some(window) = app.window_mut(window_id) {
+                if started_elsewhere {
+                    window.activity = Activity::Idle;
+                } else if news && window_id != focused {
+                    window.activity = Activity::Unseen;
+                }
+            }
+        }
+        Incoming::Close { id, expected } => {
+            let found = app.windows.iter_mut().position(|window| {
+                let idle = window.activity != Activity::Running;
+                matches!(&window.pane, Pane::Chat(chat) if idle && chat.file_id == id && crate::sync::state_sha(&chat.state) == expected)
+            });
+            if let Some(index) = found {
+                let flash = app.pending_flash.take();
+                app.close_window(index);
+                app.pending_flash = flash;
+                // Other PCs already know, and telling them again would count as a new close.
+                app.sync_closed.retain(|closed| *closed != id);
+                if let Some(index) = app.windows.iter().position(|window| window.id == focused) {
+                    app.active = index;
+                }
+            }
+        }
+    }
+}
+
+/// Applies a finished round. The chats are saved before the next round can read them.
+pub fn sync_done(app: &mut App, syncer: Box<crate::sync::Syncer>, outcome: crate::sync::Outcome) {
+    // Sync was turned off or reconnected during the round, so this worker has nothing left to do.
+    if !app.sync.as_ref().is_some_and(|link| link.syncer.is_none()) {
+        return;
+    }
+    for incoming in outcome.incoming {
+        apply_incoming(app, incoming);
+    }
+    let Some(link) = app.sync.as_mut() else { return };
+    link.syncer = Some(syncer);
+    link.unreadable = outcome.unreadable;
+    link.devices = outcome.devices;
+    match outcome.error {
+        Some(problem) => {
+            app.status = format!("{SYNC_PAUSED}{problem}");
+            link.problem = Some(problem);
+        }
+        None => {
+            link.last_ok = Some(std::time::Instant::now());
+            link.problem = None;
+            if app.status.starts_with(SYNC_PAUSED) {
+                app.status.clear();
+            }
+        }
+    }
+}
+
+fn sync_places() -> Vec<(String, PathBuf)> {
+    let home = user_home();
+    let mut places = Vec::new();
+    if let Some(folder) = std::env::var_os("OneDrive").map(PathBuf::from).filter(|folder| folder.is_dir()) {
+        places.push(("OneDrive".to_string(), folder));
+    }
+    for (name, folder) in [("Dropbox", home.join("Dropbox")), ("Google Drive", home.join("Google Drive")), ("Google Drive", PathBuf::from("G:\\My Drive")), ("iCloud Drive", home.join("iCloudDrive"))] {
+        if folder.is_dir() && !places.iter().any(|(known, _)| known == name) {
+            places.push((name.to_string(), folder));
+        }
+    }
+    places
+}
+
+fn sync_status(link: &crate::sync::Link) -> String {
+    let when = link.last_ok.map_or_else(|| "It hasn't finished a round yet.".to_string(), |last| format!("Last synced {} ago.", short_duration(Duration::from_secs(last.elapsed().as_secs()))));
+    let mut lines = vec![format!("Syncing with {}. {when}", link.settings.place)];
+    if !link.devices.is_empty() {
+        lines.push(format!("Also on: {}.", link.devices.iter().cloned().collect::<Vec<_>>().join(", ")));
+    }
+    if let Some(problem) = &link.problem {
+        lines.push(format!("Paused: {problem}"));
+    }
+    if link.unreadable > 0 {
+        lines.push(format!("{} files there can't be read with this code, so they're skipped.", link.unreadable));
+    }
+    lines.push("/sync code shows the code for another PC. /sync off stops syncing.".to_string());
+    lines.join("\n")
+}
+
+fn show_sync_code(app: &mut App, code: String) {
+    let item = PickItem { label: code.clone(), detail: "Enter copies it. Keep it private.".into(), action: Action::CopyText(code) };
+    app.picker = Some(Picker::new("Sync code", vec![item], ""));
+}
+
+fn sync_command(app: &mut App, args: &str) {
+    let args = args.trim();
+    let settings_path = app.sessions_dir.with_file_name(crate::sync::SETTINGS_FILE);
+    match args {
+        "" => {
+            if let Some(status) = app.sync.as_ref().map(sync_status) {
+                app.note_active(status);
+                return;
+            }
+            let mut items: Vec<PickItem> = sync_places()
+                .into_iter()
+                .map(|(name, folder)| {
+                    let place = folder.join("Olympus Sync");
+                    PickItem { label: name, detail: format!("Keeps encrypted chats in {}", place.display()), action: Action::Run(format!("/sync connect \"{}\"", place.display())) }
+                })
+                .collect();
+            items.push(PickItem { label: "Choose a folder…".into(), detail: "Any folder a cloud app syncs, a network share, or a USB drive".into(), action: Action::BrowseSyncFolder });
+            items.push(PickItem { label: "Another service…".into(), detail: "S3, R2, WebDAV, Google Drive and 70 more through rclone".into(), action: Action::Prefill("/sync connect remote:Olympus".into()) });
+            app.picker = Some(Picker::new("Sync your chats to", items, ""));
+        }
+        "code" => match app.sync.as_ref().map(|link| link.settings.code.clone()) {
+            Some(code) => show_sync_code(app, code),
+            None => app.fail_active("Sync isn't on yet. Run /sync to choose where your chats go."),
+        },
+        "off" => {
+            app.sync = None;
+            app.sync_closed.clear();
+            match std::fs::remove_file(&settings_path) {
+                Ok(()) => app.note_active("Sync is off, and its code is deleted from this PC. Your chats stay here, and what's already in your storage stays there. To rejoin that storage, get the code from another PC with /sync code. If this was your only PC, connect to a new folder instead."),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => app.note_active("Sync wasn't on."),
+                Err(error) => app.fail_active(format!("Sync is off until you restart, but its settings couldn't be deleted: {error}")),
+            }
+        }
+        _ => {
+            let Some(rest) = args.strip_prefix("connect").map(str::trim) else {
+                app.fail_active("Use /sync, /sync connect <folder or rclone remote> [code], /sync code, or /sync off.");
+                return;
+            };
+            // Two workers can't share one connection, and this one may be mid-round.
+            if app.sync.is_some() {
+                app.fail_active("Sync is already on. Run /sync off first to connect somewhere else.");
+                return;
+            }
+            let Some((place, code)) = crate::sync::parse_connect(rest) else {
+                app.fail_active("Say where to sync, like /sync connect D:\\Sync or /sync connect gdrive:Olympus.");
+                return;
+            };
+            if place.starts_with(['-', ':']) {
+                app.fail_active("Make a named remote with rclone config, so its keys stay out of Olympus. Then use /sync connect name:folder.");
+                return;
+            }
+            let place = if crate::sync::is_remote(&place) { place } else { expand_path(&app.current_cwd(), &place).to_string_lossy().to_string() };
+            let (layout, tx) = (sync_layout(app), app.tx.clone());
+            let device = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "another PC".to_string());
+            app.status = "Connecting to your storage".to_string();
+            tokio::task::spawn_blocking(move || {
+                let result = crate::sync::connect(crate::sync::open_store(&place), layout, &place, code, device);
+                let _ = tx.send(AppEvent::SyncConnected(result.map(Box::new).map_err(|error| (place, error))));
+            });
+        }
+    }
+}
+
+/// Starts syncing once a store has accepted this PC.
+pub fn sync_connected(app: &mut App, result: Result<Box<(crate::sync::Syncer, crate::sync::Settings)>, (String, crate::sync::ConnectError)>) {
+    app.status.clear();
+    match result {
+        Ok(connected) => {
+            let (syncer, settings) = *connected;
+            if let Err(error) = settings.save(&app.sessions_dir.with_file_name(crate::sync::SETTINGS_FILE)) {
+                app.fail_active(format!("Unable to save the connection: {error}"));
+                return;
+            }
+            let code = settings.code.clone();
+            let place = settings.place.clone();
+            app.sync = Some(crate::sync::Link::new(syncer, settings));
+            app.note_active(format!("Syncing your open threads with {place}. They're encrypted on this PC before they go there. On your other PC, run /sync connect with the same place and this code. /sync code shows it again."));
+            show_sync_code(app, code);
+        }
+        Err((place, crate::sync::ConnectError::NeedsCode)) => {
+            app.composer.set(&format!("/sync connect \"{place}\" "));
+            app.note_active("That storage already has synced chats. Add the code from your other PC, where /sync code shows it, and press Enter.");
+        }
+        Err((_, crate::sync::ConnectError::Problem(problem))) => app.fail_active(problem),
+    }
+}
+
 fn chat_windows(app: &mut App) -> Vec<(u64, String)> {
     app.windows.iter_mut().filter_map(|window| { let id = window.id; window.chat().map(|chat| (id, chat.state.title.clone())) }).collect()
 }
@@ -620,6 +899,12 @@ pub const COMMANDS: &[Command] = &[
     cmd("/keep-skill", "/keep-skill <name>", "Approve a skill draft so it can be used", true),
     cmd("/drop-skill", "/drop-skill <name>", "Delete a skill draft", true),
     cmd("/telegram", "/telegram connect <token>|off", "Reach this Olympus from your phone", true),
+    cmd("/mirror", "/mirror on|off|forget", "Open Olympus in a browser on your network, or pair a phone", true),
+    cmd("/obiview", "/obiview apps|on|off|pause|now|summaries off|<model> [messages]|exclude <app>|include <app>", "Open your vault and what Obiview has read", true),
+    cmd("/note", "/note <name>", "Open a note in your vault, or start a new one", true),
+    cmd("/talk", "/talk <words>", "Tell Jarvis something by typing, the same as holding Shift+B", true),
+    cmd("/jarvis", "/jarvis <question>", "Ask what's going on, from anything Obiview has read", true),
+    cmd("/sync", "/sync connect <folder or rclone remote> [code]|code|off", "Keep your chats and their memory the same on every PC", true),
     cmd("/screenshot", "/screenshot", "Drag a region of the screen into this message", false),
     cmd("/hotkeys", "/hotkeys on|off", "Shift+V to dictate and Shift+C to screenshot, in any app", true),
     cmd("/stop", "/stop", "Stop what this chat is doing", false),
@@ -649,12 +934,19 @@ pub fn palette(app: &App) -> Picker {
         detail: c.about.to_string(),
         action: if c.takes_args { Action::Prefill(format!("{} ", c.name)) } else { Action::Run(c.name.to_string()) },
     }));
+    if let Some(vault) = &app.obi.vault {
+        items.extend(vault.notes().iter().map(|note| PickItem { label: note.title.clone(), detail: format!("note · {}", note.rel), action: Action::OpenNote(note.rel.clone()) }));
+    }
     Picker::new("Olympus", items, "")
 }
 
 /// Carries out a picker choice.
 pub fn pick(app: &mut App, action: Action) {
     match action {
+        Action::OpenNote(rel) => {
+            crate::obiview::focus(app);
+            crate::obiview::open_note(app, &rel);
+        }
         Action::Switch(id) => {
             if let Some(index) = app.windows.iter().position(|w| w.id == id) {
                 app.active = index;
@@ -695,6 +987,11 @@ pub fn pick(app: &mut App, action: Action) {
             set_account(app, &provider, account);
         }
         Action::BrowseFolder(provider, dir) => app.pending_folder = Some((provider, dir)),
+        Action::BrowseSyncFolder => app.pending_sync_folder = true,
+        Action::CopyText(text) => {
+            app.pending_copy = Some(text);
+            app.pending_flash = Some("Sync code copied.".into());
+        }
         Action::AddAccount(provider) => {
             let name = next_account_name(&user_home(), account_kind(&provider));
             add_account(app, &provider, &name);
@@ -1781,6 +2078,12 @@ pub fn run(app: &mut App, line: &str) {
             Err(problem) => app.fail_active(problem),
         },
         "/telegram" => telegram_command(app, args),
+        "/mirror" => crate::mirror::command(app, args),
+        "/obiview" => crate::obiview::command(app, args),
+        "/jarvis" => crate::obiview::ask_jarvis(app, args),
+        "/talk" => crate::jarvis::heard(app, args),
+        "/note" => crate::obiview::note_command(app, args),
+        "/sync" => sync_command(app, args),
         "/hotkeys" => hotkeys_command(app, args),
         "/screenshot" => {
             let tx = app.tx.clone();
@@ -1806,6 +2109,240 @@ pub fn run(app: &mut App, line: &str) {
 mod tests {
     use super::*;
     use crate::app::testing::*;
+
+    fn linked_to_sync(app: &mut App, store: &Path) -> Box<crate::sync::Syncer> {
+        let layout = sync_layout(app);
+        std::fs::create_dir_all(&layout.olympus_home).expect("home");
+        let (syncer, settings) = crate::sync::connect(Box::new(crate::sync::FolderStore(store.to_path_buf())), layout, "s", None, "PC".into()).expect("connect");
+        let mut link = crate::sync::Link::new(syncer, settings);
+        let syncer = link.syncer.take().expect("syncer");
+        app.sync = Some(link);
+        syncer
+    }
+
+    fn other_pcs_chat(app: &App) -> crate::session::ChatState {
+        let mut state = Chat::new("From elsewhere".into(), app.sessions_dir.clone(), Choice::Auto).state;
+        state.blocks.push(Block::User("hello from the other PC".into()));
+        state
+    }
+
+    fn results(incoming: crate::sync::Incoming) -> crate::sync::Outcome {
+        crate::sync::Outcome { incoming: vec![incoming], ..crate::sync::Outcome::default() }
+    }
+
+    fn arriving(app: &App, id: &str, expected: Option<String>, running_on: Option<&str>) -> crate::sync::Incoming {
+        let state = other_pcs_chat(app);
+        crate::sync::Incoming::Apply { id: id.into(), state: Box::new(state.clone()), expected, running_on: running_on.map(String::from), copy: Box::new(state), copy_id: format!("{id}-copy") }
+    }
+
+    fn open_chat_with_content(app: &mut App) -> (u64, String, Option<String>) {
+        let id = app.active_id();
+        let chat = app.chat().expect("chat");
+        chat.push(Block::User("mine".into()));
+        let (file, sha) = (chat.file_id.clone(), crate::sync::state_sha(&chat.state));
+        (id, file, sha)
+    }
+
+    #[test]
+    fn a_chat_arriving_from_another_pc_doesnt_take_the_focus() {
+        let (mut app, _rx, _dir) = app(true);
+        let store = tempfile::tempdir().expect("store");
+        let syncer = linked_to_sync(&mut app, store.path());
+        let focused = app.active_id();
+
+        let incoming = arriving(&app, "new", None, None);
+        sync_done(&mut app, syncer, results(incoming));
+
+        assert_eq!(app.active_id(), focused);
+        let window = app.windows.last().expect("window");
+        assert_eq!((window.title(), window.activity), ("From elsewhere", Activity::Unseen));
+        assert!(app.sessions_dir.join("new.json").exists());
+        assert!(app.sync.as_ref().expect("link").syncer.is_some(), "the worker must be back for the next round");
+    }
+
+    #[test]
+    fn a_chat_running_elsewhere_counts_as_finished_only_once_it_stops() {
+        let (mut app, _rx, _dir) = app(true);
+        let store = tempfile::tempdir().expect("store");
+        let syncer = linked_to_sync(&mut app, store.path());
+        let focused = app.active_id();
+
+        let incoming = arriving(&app, "new", None, Some("LAPTOP"));
+        sync_done(&mut app, syncer, results(incoming));
+        let window = app.windows.last_mut().expect("window");
+        assert_eq!(window.activity, Activity::Idle);
+        let (id, sha) = {
+            let chat = window.chat().expect("chat");
+            assert_eq!(chat.running_elsewhere(), Some("LAPTOP"));
+            (chat.file_id.clone(), crate::sync::state_sha(&chat.state))
+        };
+
+        let syncer = app.sync.as_mut().expect("link").syncer.take().expect("worker");
+        let incoming = arriving(&app, &id, sha, None);
+        sync_done(&mut app, syncer, results(incoming));
+
+        assert_eq!(app.active_id(), focused);
+        let window = app.windows.last_mut().expect("window");
+        assert_eq!(window.activity, Activity::Unseen);
+        assert_eq!(window.chat().expect("chat").running_elsewhere(), None);
+    }
+
+    #[test]
+    fn a_finished_chat_that_starts_again_elsewhere_stops_saying_finished() {
+        let (mut app, _rx, _dir) = app(true);
+        let store = tempfile::tempdir().expect("store");
+        let syncer = linked_to_sync(&mut app, store.path());
+        let incoming = arriving(&app, "new", None, None);
+        sync_done(&mut app, syncer, results(incoming));
+        let window = app.windows.last_mut().expect("window");
+        assert_eq!(window.activity, Activity::Unseen);
+        let sha = crate::sync::state_sha(&window.chat().expect("chat").state);
+
+        let syncer = app.sync.as_mut().expect("link").syncer.take().expect("worker");
+        let incoming = arriving(&app, "new", sha, Some("LAPTOP"));
+        sync_done(&mut app, syncer, results(incoming));
+
+        assert_eq!(app.windows.last().expect("window").activity, Activity::Idle);
+    }
+
+    #[test]
+    fn an_update_replaces_an_unchanged_chat_in_place() {
+        let (mut app, _rx, _dir) = app(true);
+        let store = tempfile::tempdir().expect("store");
+        let syncer = linked_to_sync(&mut app, store.path());
+        let (_, file, sha) = open_chat_with_content(&mut app);
+        let count = app.windows.len();
+
+        let incoming = arriving(&app, &file, sha, None);
+        sync_done(&mut app, syncer, results(incoming));
+
+        assert_eq!(app.windows.len(), count);
+        assert_eq!(app.chat().expect("chat").state.title, "From elsewhere");
+    }
+
+    #[test]
+    fn typing_during_a_round_keeps_both_versions() {
+        let (mut app, _rx, _dir) = app(true);
+        let store = tempfile::tempdir().expect("store");
+        let syncer = linked_to_sync(&mut app, store.path());
+        let (_, file, sha) = open_chat_with_content(&mut app);
+
+        app.chat().expect("chat").push(Block::User("typed while syncing".into()));
+        let incoming = arriving(&app, &file, sha, None);
+        sync_done(&mut app, syncer, results(incoming));
+
+        assert!(matches!(app.chat().expect("chat").state.blocks.last(), Some(Block::User(text)) if text == "typed while syncing"));
+        let copy = app.windows.last_mut().and_then(crate::session::Window::chat).expect("copy");
+        assert_eq!((copy.file_id.as_str(), copy.state.title.as_str()), (format!("{file}-copy").as_str(), "From elsewhere"));
+    }
+
+    #[test]
+    fn a_message_waits_while_the_chat_runs_on_another_pc() {
+        let (mut app, _rx, _dir) = app(true);
+        let store = tempfile::tempdir().expect("store");
+        let syncer = linked_to_sync(&mut app, store.path());
+        let (id, file, sha) = open_chat_with_content(&mut app);
+        let incoming = arriving(&app, &file, sha, Some("LAPTOP"));
+        sync_done(&mut app, syncer, results(incoming));
+        let before = app.chat().expect("chat").state.blocks.len();
+
+        app.send(id, "carry on".into());
+
+        assert_eq!(app.chat().expect("chat").state.blocks.len(), before);
+        assert_eq!(app.composer.text, "carry on");
+        assert!(app.pending_flash.as_deref().is_some_and(|text| text.contains("LAPTOP")));
+        assert_ne!(app.windows.iter().find(|window| window.id == id).expect("window").activity, Activity::Running);
+    }
+
+    #[test]
+    fn closing_elsewhere_closes_it_here_without_telling_everyone_again() {
+        let (mut app, _rx, _dir) = app(true);
+        let store = tempfile::tempdir().expect("store");
+        let syncer = linked_to_sync(&mut app, store.path());
+        let (id, file, sha) = open_chat_with_content(&mut app);
+        let other = app.new_chat(app.sessions_dir.clone());
+
+        sync_done(&mut app, syncer, results(crate::sync::Incoming::Close { id: file, expected: sha }));
+
+        assert!(app.windows.iter().all(|window| window.id != id));
+        assert_eq!(app.active_id(), other);
+        assert!(app.sync_closed.is_empty());
+    }
+
+    #[test]
+    fn closing_a_chat_here_tells_other_pcs_only_when_syncing() {
+        let (mut app, _rx, _dir) = app(true);
+        app.chat().expect("chat").push(Block::User("x".into()));
+        app.close_active();
+        assert!(app.sync_closed.is_empty());
+
+        let store = tempfile::tempdir().expect("store");
+        let _worker = linked_to_sync(&mut app, store.path());
+        let (_, file, _) = open_chat_with_content(&mut app);
+        app.close_active();
+        assert_eq!(app.sync_closed, vec![file]);
+    }
+
+    #[test]
+    fn a_round_from_before_sync_was_turned_off_changes_nothing() {
+        let (mut app, _rx, _dir) = app(true);
+        let store = tempfile::tempdir().expect("store");
+        let syncer = linked_to_sync(&mut app, store.path());
+        let count = app.windows.len();
+        run(&mut app, "/sync off");
+
+        let incoming = arriving(&app, "late", None, None);
+        sync_done(&mut app, syncer, results(incoming));
+
+        assert_eq!(app.windows.len(), count);
+    }
+
+    #[test]
+    fn storage_that_already_has_chats_asks_for_the_code_and_keeps_your_place() {
+        let (mut app, _rx, _dir) = app(true);
+        sync_connected(&mut app, Err(("D:\\My Sync".into(), crate::sync::ConnectError::NeedsCode)));
+        assert_eq!(app.composer.text, "/sync connect \"D:\\My Sync\" ");
+        assert!(app.sync.is_none());
+    }
+
+    #[test]
+    fn connecting_saves_the_connection_and_shows_the_code_without_writing_it_in_the_chat() {
+        let (mut app, _rx, _dir) = app(true);
+        let store = tempfile::tempdir().expect("store");
+        let layout = sync_layout(&app);
+        std::fs::create_dir_all(&layout.olympus_home).expect("home");
+        let connected = crate::sync::connect(Box::new(crate::sync::FolderStore(store.path().to_path_buf())), layout, "s", None, "PC".into()).expect("connect");
+        let code = connected.1.code.clone();
+
+        sync_connected(&mut app, Ok(Box::new(connected)));
+
+        assert!(app.sync.is_some());
+        assert_eq!(crate::sync::Settings::load(&app.sessions_dir.with_file_name(crate::sync::SETTINGS_FILE)).expect("settings").code, code);
+        assert_eq!(app.picker.as_ref().expect("picker").items[0].label, code);
+        let saved = serde_json::to_string(&app.chat().expect("chat").state).expect("json");
+        assert!(!saved.contains(&code), "the code must never reach a chat that syncs");
+    }
+
+    #[test]
+    fn connecting_twice_is_refused_while_a_round_may_be_running() {
+        let (mut app, _rx, _dir) = app(true);
+        let store = tempfile::tempdir().expect("store");
+        let _worker = linked_to_sync(&mut app, store.path());
+        run(&mut app, "/sync connect D:\\Elsewhere");
+        assert!(matches!(app.chat().expect("chat").state.blocks.last(), Some(Block::Error(text)) if text.contains("/sync off")));
+    }
+
+    #[test]
+    fn a_chat_with_no_memory_here_sends_its_recent_history_once() {
+        let mut chat = Chat::new("x".into(), PathBuf::from("."), Choice::Auto);
+        chat.state.carry_context = true;
+        chat.push(Block::User("the plan is pineapple".into()));
+
+        assert_eq!(chat.with_carried_context("/skill go".into()), "/skill go", "a skill's name must stay first");
+        let sent = chat.with_carried_context("carry on".into());
+        assert!(sent.contains("pineapple") && !chat.state.carry_context, "{sent}");
+        assert_eq!(chat.with_carried_context("next".into()), "next");
+    }
     use crate::input::{KeyCode, KeyModifiers};
 
     fn last_block(app: &mut App) -> Block {

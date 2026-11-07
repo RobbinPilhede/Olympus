@@ -2,6 +2,9 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod app;
+mod app_list;
+mod jarvis;
+mod speech;
 mod capture;
 mod commands;
 mod composer;
@@ -10,11 +13,14 @@ mod gui;
 mod hotkeys;
 mod input;
 mod markdown;
+mod mirror;
 mod notify;
+mod obiview;
 mod pill;
 mod pty;
 mod schedule;
 mod session;
+mod sync;
 mod telegram;
 mod theme;
 mod update;

@@ -29,6 +29,7 @@ impl Root {
 
     fn composer_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         self.selection = None;
+        self.app.obi.searching = false;
         let index = self.composer_index(event.position);
         let composer = &mut self.app.composer;
         match event.click_count {
@@ -181,7 +182,7 @@ impl Root {
             _ => (String::new(), false, String::new()),
         };
         let has_accounts = model.contains("claude") || model.contains("codex") || model.starts_with("auto");
-        let placeholder = if running { "Working. Type to queue the next message." } else { "Message, /command or @model" };
+        let placeholder = if self.app.obiview_active() { "Ask Jarvis what's going on" } else if running { "Working. Type to queue the next message." } else { "Message, /command or @model" };
         let (text, runs) = self.composer_text(placeholder);
         let styled = StyledText::new(text).with_runs(runs);
         let layout = styled.layout().clone();
@@ -220,11 +221,12 @@ impl Root {
         .left_0()
         .size_full();
         let reduce_motion = self.app.reduce_motion;
+        let jarvis = self.app.obiview_active();
         let next_profile = if full_profile { "/profile lean" } else { "/profile full" };
         let hints = self.hints(cx);
         let attachments = self.attachment_row(cx);
         let border = if running { theme::line() } else { theme::tint(theme::accent(), 0.55) };
-        div().flex_none().px(px(14.)).pb(px(12.)).pt(px(6.)).child(div().relative().w_full().max_w(px(908.)).mx_auto().children(hints).child(
+        div().flex_none().px(px(14.)).pb(px(12.)).pt(px(6.)).child(div().relative().w_full().max_w(px(908.)).mx_auto().when(jarvis && !self.app.obi.narrow, |el| el.w(px(crate::gui::obi_view::CHAT_WIDTH - 28.))).children(hints).child(
             div()
                 .id("composer")
                 .relative()
@@ -267,11 +269,11 @@ impl Root {
                         .items_center()
                         .gap_1()
                         .child(control("pick-model", SharedString::from(model), theme::accent()).on_click(cx.listener(|root, _, _, cx| root.run_command("/model", cx))))
-                        .when(has_accounts, |el| {
+                        .when(has_accounts && !jarvis, |el| {
                             el.child(control("pick-account", SharedString::from(format!("account: {account}")), theme::dim()).on_click(cx.listener(|root, _, _, cx| root.run_command("/account", cx))))
                         })
-                        .child(control("toggle-profile", if full_profile { "full setup" } else { "lean setup" }, theme::dim()).on_click(cx.listener(move |root, _, _, cx| root.run_command(next_profile, cx))))
-                        .child(div().flex_none().px(px(8.)).text_size(px(12.)).text_color(theme::red()).child("bypass on"))
+                        .when(!jarvis, |el| el.child(control("toggle-profile", if full_profile { "full setup" } else { "lean setup" }, theme::dim()).on_click(cx.listener(move |root, _, _, cx| root.run_command(next_profile, cx)))))
+                        .child(if self.app.obiview_active() { div().flex_none().px(px(8.)).text_size(px(12.)).text_color(theme::dim()).child("read-only") } else { div().flex_none().px(px(8.)).text_size(px(12.)).text_color(theme::red()).child("bypass on") })
                         .child(div().flex_1())
                         .when(running, |el| {
                             el.child(control("stop", "Stop  Esc", theme::text()).border_1().border_color(theme::line()).on_click(cx.listener(|root, _, _, cx| {

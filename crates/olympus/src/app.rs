@@ -42,6 +42,9 @@ pub enum Action {
     NewChatIn { provider: Provider, account: Option<PathBuf>, cwd: PathBuf },
     BrowseFolder(Provider, Option<PathBuf>),
     AddAccount(Provider),
+    CopyText(String),
+    OpenNote(String),
+    BrowseSyncFolder,
 }
 
 /// One picker row.
@@ -124,6 +127,22 @@ pub enum AppEvent {
     Phone { chat: i64, text: String },
     /// A bot token checked out, so the connection can start.
     PhoneChecked { token: String, bot: Option<String> },
+    /// Time to see whether chats should sync.
+    SyncTick,
+    /// A sync round finished, and the worker comes back with its results.
+    SyncDone(Box<crate::sync::Syncer>, crate::sync::Outcome),
+    /// A connection attempt finished.
+    SyncConnected(Result<Box<(crate::sync::Syncer, crate::sync::Settings)>, (String, crate::sync::ConnectError)>),
+    /// A browser on your network wants something; the reply goes straight back to it.
+    Mirror(crate::mirror::Ask, tokio::sync::oneshot::Sender<serde_json::Value>),
+    /// Time for Obiview to write what it has seen into your notes.
+    ObiTick,
+    /// A model finished writing notes from what Obiview saw.
+    ObiDistilled(Result<String, String>),
+    ObiApps(Vec<crate::app_list::AppEntry>),
+    JarvisListening,
+    JarvisHeard(String),
+    JarvisAnswered { spoken: String, outcome: Result<crate::jarvis::Plan, String> },
     Wake,
 }
 
@@ -151,6 +170,8 @@ pub struct App {
     pub pending_details: bool,
     /// The account waiting on the native folder dialog for its new chat.
     pub pending_folder: Option<(Provider, Option<PathBuf>)>,
+    /// Waiting on the native folder dialog for where to sync.
+    pub pending_sync_folder: bool,
     pub diff_open: bool,
     /// Claude account folders besides the default, for the usage panel.
     pub account_folders: Vec<PathBuf>,
@@ -168,6 +189,14 @@ pub struct App {
     pub phone: Option<crate::telegram::Phone>,
     /// Lets the phone connection transcribe voice memos; set once the interface starts it.
     pub voice: Option<crate::voice::Voice>,
+    pub sync: Option<crate::sync::Link>,
+    /// Chats closed here that other PCs haven't heard about yet.
+    pub sync_closed: Vec<String>,
+    /// The server behind the phone-access switch, while it's on.
+    pub mirror: Option<crate::mirror::Mirror>,
+    /// The pairing panel is open.
+    pub mirror_panel: bool,
+    pub obi: crate::obiview::Obi,
     pub quit: bool,
     pub quit_armed: bool,
     next_id: u64,
@@ -198,6 +227,7 @@ impl App {
             pending_copy: None,
             pending_details: false,
             pending_folder: None,
+            pending_sync_folder: false,
             diff_open: false,
             account_folders: commands::extra_account_folders(),
             attachments: Vec::new(),
@@ -210,6 +240,11 @@ impl App {
             schedules: crate::schedule::load(&sessions_dir.with_file_name(commands::SCHEDULES_FILE)),
             phone: None,
             voice: None,
+            sync: None,
+            sync_closed: Vec::new(),
+            mirror: None,
+            mirror_panel: false,
+            obi: crate::obiview::Obi::default(),
             sessions_dir,
             quit: false,
             quit_armed: false,
@@ -313,7 +348,7 @@ impl App {
 
     /// Moves a thread to another place in the list; the same thread stays focused.
     pub fn move_window(&mut self, from: usize, to: usize) {
-        if from == to || from >= self.windows.len() || to >= self.windows.len() {
+        if from == to || from >= self.windows.len() || to >= self.windows.len() || crate::obiview::index(self).is_some_and(|pinned| pinned == from || pinned == to) {
             return;
         }
         let focused = self.active_id();
@@ -324,7 +359,7 @@ impl App {
     }
 
     fn save_order(&self) {
-        let ids: Vec<&str> = self.windows.iter().filter_map(|w| if let Pane::Chat(chat) = &w.pane { Some(chat.file_id.as_str()) } else { None }).collect();
+        let ids: Vec<&str> = self.windows.iter().filter_map(|w| if let Pane::Chat(chat) = &w.pane { (!crate::obiview::is_obiview(chat)).then_some(chat.file_id.as_str()) } else { None }).collect();
         // Losing the order isn't worth interrupting anything; the next move or quit saves it again.
         let _ = session::save_order(&self.sessions_dir, &ids);
     }
@@ -343,7 +378,7 @@ impl App {
 
     /// Closes a window; running work is stopped, chats can return with `/reopen`, and the last window is replaced by a blank chat.
     pub fn close_window(&mut self, index: usize) {
-        if index >= self.windows.len() {
+        if index >= self.windows.len() || crate::obiview::index(self) == Some(index) {
             return;
         }
         let mut window = self.windows.remove(index);
@@ -351,6 +386,9 @@ impl App {
         if let Pane::Chat(chat) = &mut window.pane {
             if let Some(cancel) = chat.cancel.take() {
                 let _ = cancel.send(true);
+            }
+            if self.sync.is_some() {
+                self.sync_closed.push(chat.file_id.clone());
             }
             if chat.state.blocks.is_empty() {
                 let _ = std::fs::remove_file(self.sessions_dir.join(format!("{}.json", chat.file_id)));
@@ -364,7 +402,7 @@ impl App {
         if index < self.active {
             self.active -= 1;
         }
-        if self.windows.is_empty() {
+        if self.windows.iter().all(|w| matches!(&w.pane, Pane::Chat(chat) if crate::obiview::is_obiview(chat))) {
             let cwd = std::env::current_dir().unwrap_or_else(|_| user_home());
             self.new_chat(cwd);
         }
@@ -385,13 +423,18 @@ impl App {
     fn save_window(&self, id: u64) {
         if let Some(Window { pane: Pane::Chat(chat), .. }) = self.windows.iter().find(|w| w.id == id) {
             // Losing one snapshot isn't worth interrupting the session; the next turn saves again.
-            let _ = session::save(chat, &self.sessions_dir);
+            let _ = if crate::obiview::is_obiview(chat) { crate::obiview::save_chat(chat) } else { session::save(chat, &self.sessions_dir) };
         }
     }
 
     /// Sends the composer's content.
     pub fn submit(&mut self) {
         let text = self.composer.take();
+        self.deliver(text);
+    }
+
+    /// Acts on a message, command or `@model` question for the focused thread.
+    pub fn deliver(&mut self, text: String) {
         let trimmed = text.trim();
         let plain_message = !trimmed.starts_with('/') && !trimmed.starts_with('@');
         if trimmed.is_empty() && self.attachments.is_empty() {
@@ -461,6 +504,14 @@ impl App {
         let Some(window) = self.window_mut(id) else { return };
         let running = window.activity == Activity::Running;
         let Some(chat) = window.chat() else { return };
+        if let Some(device) = chat.running_elsewhere().map(str::to_string) {
+            // Sending now would fork the chat, so your message waits in the box instead.
+            self.pending_flash = Some(format!("This chat is still running on {device}. Send your message when it finishes."));
+            if id == self.active_id() && self.composer.text.is_empty() {
+                self.composer.set(&text);
+            }
+            return;
+        }
         if running {
             chat.queue.push_back(text);
             let count = chat.queue.len();
@@ -491,12 +542,18 @@ impl App {
     /// Starts a turn on a chat's model.
     pub fn start_turn(&mut self, id: u64, prompt: String) {
         let (tx, rt) = (self.tx.clone(), self.rt.clone());
+        let jarvis = crate::obiview::is_jarvis_window(self, id);
+        let vault_hits = if jarvis { crate::obiview::vault_hits(self, &prompt) } else { String::new() };
+        if jarvis && self.obi.narrow {
+            self.obi.tab = crate::obiview::Tab::Jarvis;
+        }
         let Some(window) = self.window_mut(id) else { return };
         window.activity = Activity::Running;
         let Some(chat) = window.chat() else { return };
         let (cancel_tx, cancel) = cancel_pair();
         chat.cancel = Some(cancel_tx);
         chat.last_prompt = prompt.clone();
+        let prompt = chat.with_carried_context(prompt);
         let choice = chat.state.choice.clone();
         let last_target = chat.state.last_target.clone();
         let session = chat.state.vendor_session.clone();
@@ -512,6 +569,8 @@ impl App {
                     None => rt.pick(Tier::for_task(classify_task(&prompt)), &prompt, &cwd).await,
                 },
             };
+            // Jarvis reads your private text, and stays on the subscriptions you've connected.
+            let target = target.and_then(|target| if jarvis && target.provider == olympus_core::target::Provider::OpenRouter { Err("Jarvis only uses your connected subscriptions. Choose Claude or Codex for this thread.".to_string()) } else { Ok(target) });
             let target = match target {
                 Ok(target) => target,
                 Err(message) => {
@@ -528,7 +587,12 @@ impl App {
                     return;
                 }
             };
+            // What Jarvis reads includes strangers' mail, so its turns can't change anything on this PC.
+            let prompt = if jarvis { tokio::task::spawn_blocking(move || crate::obiview::jarvis_prompt(&prompt, &vault_hits)).await.unwrap_or_default() } else { prompt };
             let mut req = TurnRequest::new(target.clone(), prompt, cwd);
+            if jarvis {
+                req.access = olympus_core::agent::Access::ReadOnly;
+            }
             req.resume = session.filter(|_| previous.as_ref() == Some(&target));
             req.profile = if needs_setup { olympus_core::agent::Profile::Full } else { profile };
             req.deferred_outcome = true;
@@ -744,6 +808,7 @@ impl App {
                 }
             }
             AppEvent::TurnDone { window, target, result } => {
+                crate::jarvis::task_done(self, window, &result);
                 self.finish_turn(window, target, result);
                 self.refresh_diff();
                 if self.account_folders.iter().any(|dir| !self.account_labels.contains_key(dir)) {
@@ -802,6 +867,19 @@ impl App {
             AppEvent::ScheduleTick => commands::run_due_schedules(self),
             AppEvent::Phone { chat, text } => commands::phone_message(self, chat, &text),
             AppEvent::PhoneChecked { token, bot } => commands::finish_phone_connect(self, token, bot),
+            AppEvent::SyncTick => commands::sync_tick(self),
+            AppEvent::SyncDone(syncer, outcome) => commands::sync_done(self, syncer, outcome),
+            AppEvent::SyncConnected(result) => commands::sync_connected(self, result),
+            AppEvent::Mirror(ask, reply) => {
+                // The page may have gone away while waiting, and that's fine.
+                let _ = reply.send(crate::mirror::answer(self, ask));
+            }
+            AppEvent::ObiTick => crate::obiview::tick(self),
+            AppEvent::ObiDistilled(outcome) => crate::obiview::distilled(self, outcome),
+            AppEvent::ObiApps(apps) => crate::obiview::apps_found(self, apps),
+            AppEvent::JarvisListening => crate::jarvis::listening(self),
+            AppEvent::JarvisHeard(spoken) => crate::jarvis::heard(self, &spoken),
+            AppEvent::JarvisAnswered { spoken, outcome } => crate::jarvis::answered(self, &spoken, outcome),
             AppEvent::Wake => {}
         }
     }
@@ -884,6 +962,9 @@ impl App {
 
     /// Delivers typed text to whatever has the keyboard.
     pub fn text_input(&mut self, text: &str) {
+        if crate::obiview::takes_text(self, text) {
+            return;
+        }
         if let Some(picker) = &mut self.picker {
             picker.query.push_str(text.lines().next().unwrap_or(""));
             picker.selected = 0;
@@ -1026,6 +1107,9 @@ impl App {
         if self.global_key(key) {
             return;
         }
+        if crate::obiview::takes_key(self, key) {
+            return;
+        }
         let Some(window) = self.windows.get_mut(self.active) else { return };
         if let Pane::Term(term) = &mut window.pane {
             term.pty.send(&key_bytes(key));
@@ -1118,7 +1202,8 @@ impl App {
         }
     }
 
-    fn scroll(&mut self, delta: isize) {
+    /// Scrolls the focused window; positive moves back in time.
+    pub fn scroll(&mut self, delta: isize) {
         let Some(window) = self.windows.get_mut(self.active) else { return };
         match &mut window.pane {
             Pane::Chat(_) => self.pending_scroll += delta,
@@ -1133,6 +1218,9 @@ impl App {
 
     /// Handles pasted text.
     pub fn paste(&mut self, text: &str) {
+        if crate::obiview::takes_text(self, text) {
+            return;
+        }
         if let Some(picker) = &mut self.picker {
             picker.query.push_str(text.lines().next().unwrap_or(""));
             picker.selected = 0;

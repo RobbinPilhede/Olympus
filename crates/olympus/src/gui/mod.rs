@@ -1,10 +1,12 @@
-mod chrome;
+pub mod chrome;
 mod composer_view;
+mod mirror_view;
+pub mod obi_view;
 mod overlay;
 pub mod parts;
 mod review;
 mod splash;
-mod terminal;
+pub mod terminal;
 mod transcript;
 
 use crate::app::{start_ingest, Action, App};
@@ -41,6 +43,12 @@ const FONT: &str = "JetBrains Mono";
 const LOGO: &str = "olympus.svg";
 const CLAUDE_MARK: &str = "claude.svg";
 const OPENAI_MARK: &str = "openai.svg";
+pub const JARVIS_MARK: &str = "jarvis.svg";
+const TERMINAL_ICON: &str = "terminal.svg";
+const HISTORY_ICON: &str = "history.svg";
+const NETWORK_ICON: &str = "network.svg";
+const SEARCH_ICON: &str = "search.svg";
+const WRENCH_ICON: &str = "wrench.svg";
 const LINE: f32 = 21.0;
 const BODY: f32 = 13.5;
 
@@ -103,6 +111,8 @@ pub struct Root {
     composer_scroll: gpui::ScrollHandle,
     threads_scroll: gpui::ScrollHandle,
     dragged_thread: Option<u64>,
+    obi_editor_layout: Option<TextLayout>,
+    obi_graph_bounds: Rc<RefCell<Bounds<Pixels>>>,
     caret: Option<Bounds<Pixels>>,
     sidebar: bool,
     flash: Option<SharedString>,
@@ -120,6 +130,12 @@ impl gpui::AssetSource for Assets {
             LOGO => Some(Cow::Borrowed(include_bytes!("../../assets/icon/olympus.svg").as_slice())),
             CLAUDE_MARK => Some(Cow::Borrowed(include_bytes!("../../assets/icon/claude.svg").as_slice())),
             OPENAI_MARK => Some(Cow::Borrowed(include_bytes!("../../assets/icon/openai.svg").as_slice())),
+            JARVIS_MARK => Some(Cow::Borrowed(include_bytes!("../../assets/icon/jarvis.svg").as_slice())),
+            TERMINAL_ICON => Some(Cow::Borrowed(include_bytes!("../../assets/icon/terminal.svg").as_slice())),
+            HISTORY_ICON => Some(Cow::Borrowed(include_bytes!("../../assets/icon/history.svg").as_slice())),
+            NETWORK_ICON => Some(Cow::Borrowed(include_bytes!("../../assets/icon/network.svg").as_slice())),
+            SEARCH_ICON => Some(Cow::Borrowed(include_bytes!("../../assets/icon/search.svg").as_slice())),
+            WRENCH_ICON => Some(Cow::Borrowed(include_bytes!("../../assets/icon/wrench.svg").as_slice())),
             splash::PEAK_LEFT => Some(Cow::Borrowed(include_bytes!("../../assets/icon/peak-left.svg").as_slice())),
             splash::PEAK_RIGHT => Some(Cow::Borrowed(include_bytes!("../../assets/icon/peak-right.svg").as_slice())),
             splash::BOLT => Some(Cow::Borrowed(include_bytes!("../../assets/icon/bolt.svg").as_slice())),
@@ -128,7 +144,7 @@ impl gpui::AssetSource for Assets {
     }
 
     fn list(&self, _: &str) -> gpui::Result<Vec<SharedString>> {
-        Ok(vec![LOGO.into(), CLAUDE_MARK.into(), OPENAI_MARK.into(), splash::PEAK_LEFT.into(), splash::PEAK_RIGHT.into(), splash::BOLT.into()])
+        Ok(vec![LOGO.into(), CLAUDE_MARK.into(), OPENAI_MARK.into(), JARVIS_MARK.into(), TERMINAL_ICON.into(), HISTORY_ICON.into(), NETWORK_ICON.into(), SEARCH_ICON.into(), WRENCH_ICON.into(), splash::PEAK_LEFT.into(), splash::PEAK_RIGHT.into(), splash::BOLT.into()])
     }
 }
 
@@ -193,21 +209,29 @@ impl Root {
         app.refresh_account_labels();
         crate::capture::prune_in_background();
         crate::hotkeys::set_enabled(!home_dir().join(crate::app::HOTKEYS_OFF).exists());
-        let (voice, shots) = (crate::voice::spawn(), tx.clone());
+        let (voice, shots, heard) = (crate::voice::spawn(tx.clone()), tx.clone(), tx.clone());
         app.voice = Some(voice.clone());
         commands::resume_phone(&mut app);
         commands::start_schedule_clock(tx.clone());
+        commands::resume_sync(&mut app);
+        commands::start_sync_clock(tx.clone());
+        crate::mirror::resume(&mut app);
+        crate::obiview::start(&mut app);
         crate::hotkeys::spawn(move |signal| match signal {
             Signal::Start(Chord::Voice) => voice.start(false),
-            Signal::StartLocked => voice.start(true),
-            Signal::Stop(Chord::Voice) => voice.stop(),
+            Signal::StartLocked(Chord::Voice) => voice.start(true),
+            Signal::Start(Chord::Jarvis) | Signal::StartLocked(Chord::Jarvis) => {
+                let _ = heard.send(AppEvent::JarvisListening);
+                voice.start_for_jarvis(matches!(signal, Signal::StartLocked(_)));
+            }
+            Signal::Stop(Chord::Voice | Chord::Jarvis) => voice.stop(),
             Signal::Start(Chord::Shot) => {
                 let shots = shots.clone();
                 crate::capture::select(move |path| {
                     let _ = shots.send(AppEvent::Attach(path));
                 });
             }
-            Signal::Stop(Chord::Shot) => {}
+            Signal::StartLocked(Chord::Shot) | Signal::Stop(Chord::Shot) => {}
         });
         start_ingest(tx);
         cx.spawn(async move |this, cx| {
@@ -253,6 +277,8 @@ impl Root {
             composer_scroll: gpui::ScrollHandle::new(),
             threads_scroll: gpui::ScrollHandle::new(),
             dragged_thread: None,
+            obi_editor_layout: None,
+            obi_graph_bounds: Rc::default(),
             caret: None,
             sidebar: true,
             flash: None,
@@ -272,6 +298,7 @@ impl Root {
             std::process::exit(0);
         }
         self.announce(cx);
+        crate::mirror::publish(&self.app);
         if let Some(text) = self.app.pending_flash.take() {
             self.flash_for(&text, Duration::from_secs(5), cx);
         }
@@ -283,6 +310,9 @@ impl Root {
         }
         if let Some((provider, account)) = self.app.pending_folder.take() {
             self.browse_for_folder(provider, account, cx);
+        }
+        if std::mem::take(&mut self.app.pending_sync_folder) {
+            self.browse_for_sync_folder(cx);
         }
         cx.notify();
     }
@@ -298,6 +328,19 @@ impl Root {
             };
             let _ = this.update(cx, |root, cx| {
                 commands::pick(&mut root.app, action);
+                root.after_change(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn browse_for_sync_folder(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Sync here".into()) });
+        cx.spawn(async move |this, cx| {
+            let folder = chosen.await.ok().and_then(Result::ok).flatten().and_then(|paths| paths.into_iter().next());
+            let _ = this.update(cx, |root, cx| {
+                let command = folder.map_or_else(|| "/sync".to_string(), |folder| format!("/sync connect \"{}\"", folder.display()));
+                commands::run(&mut root.app, &command);
                 root.after_change(cx);
             });
         })
@@ -667,6 +710,31 @@ fn control(id: impl Into<ElementId>, label: impl Into<SharedString>, color: Hsla
     control_base(id, label, color).hover(|s| s.bg(theme::overlay())).active(|s| s.bg(theme::line()))
 }
 
+struct Tip(SharedString);
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().px(px(8.)).py(px(4.)).rounded(px(6.)).bg(theme::overlay()).border_1().border_color(theme::line()).text_size(px(12.)).text_color(theme::text()).whitespace_nowrap().child(self.0.clone())
+    }
+}
+
+/// A button that's only an icon, which says what it does when you hover over it.
+fn icon_control(id: impl Into<ElementId>, icon: &'static str, tip: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .h(px(32.))
+        .rounded(px(6.))
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::overlay()))
+        .active(|s| s.bg(theme::line()))
+        .tooltip(move |_, cx| cx.new(|_| Tip(tip.into())).into())
+        .child(gpui::svg().path(icon).size(px(18.)).text_color(theme::dim()))
+}
+
 /// The one filled control in a view: its primary action.
 fn primary_control(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
     control_base(id, label, theme::bg()).bg(theme::accent()).font_weight(FontWeight::BOLD).hover(|s| s.opacity(0.88)).active(|s| s.opacity(0.76))
@@ -715,7 +783,7 @@ fn utf8_to_utf16(text: &str, target: usize) -> usize {
 
 impl Root {
     fn composer_takes_text(&self) -> bool {
-        self.app.picker.is_none() && self.app.active_is_chat()
+        self.app.picker.is_none() && self.app.active_is_chat() && !crate::obiview::input_here(&self.app)
     }
 }
 
@@ -839,19 +907,27 @@ impl Render for Root {
                             .flex_1()
                             .min_h_0()
                             .when(show_sidebar, |el| el.child(self.sidebar_view(cx)))
-                            .when(!review_replaces_main, |el| el.child(self.main_view(cx)))
+                            .when(!review_replaces_main, |el| el.child(self.main_view(window, width, cx)))
                             .when(show_review, |el| el.child(self.review_panel(review_replaces_main, cx))),
                     )
-                    .child(self.footer(width, !show_sidebar)),
+                    .child(self.footer(width, !show_sidebar, cx)),
             )
             .when(self.app.picker.is_some(), |el| el.child(self.picker_overlay(f32::from(window.viewport_size().height), cx)))
+            .when(self.app.mirror_panel, |el| el.child(self.mirror_panel(cx)))
     }
 }
 
 impl Root {
-    fn main_view(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = if self.app.grid { self.grid_view(cx) } else { self.window_view(self.app.active, cx) };
-        div().flex().flex_col().flex_1().min_w_0().min_h_0().child(div().flex_1().min_h_0().child(content)).when(self.app.active_is_chat(), |el| el.child(self.composer_view(cx)))
+    fn main_view(&mut self, window: &mut Window, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = if self.app.grid {
+            self.grid_view(cx)
+        } else if self.app.obiview_active() {
+            self.obi_view(window, width, cx)
+        } else {
+            self.window_view(self.app.active, cx)
+        };
+        let composer_here = self.app.active_is_chat() && !(self.app.obiview_active() && !self.app.grid && crate::obiview::keeps_chat_beside(width));
+        div().flex().flex_col().flex_1().min_w_0().min_h_0().child(div().flex_1().min_h_0().child(content)).when(composer_here, |el| el.child(self.composer_view(cx)))
     }
 
     fn window_view(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {

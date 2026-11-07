@@ -1,6 +1,6 @@
 # Olympus: working on it
 
-You are in the source of Olympus, the owner's personal Jarvis. The owner opens this session from **Self-improve** in the Olympus sidebar and talks to you to change Olympus itself. Permissions are bypassed on purpose. Do the work end to end, without asking for go-aheads, and report what you checked.
+You are in the source of Olympus, the owner's personal Jarvis. The owner opens this session from **Self-improve**, the wrench in the Olympus sidebar, and talks to you to change Olympus itself. Permissions are bypassed on purpose. Do the work end to end, without asking for go-aheads, and report what you checked.
 
 The owner runs this on their own PC and network, and accessibility is not a concern here. The repo is public at `https://github.com/RobbinPilhede/Olympus`, so never commit keys, personal paths, machine names or LAN addresses. Settings and secrets stay in `~/.olympus/config.toml` or environment variables. `README.md` lists every feature and shortcut as the owner sees them, so read it when you need one and keep it up to date.
 
@@ -24,10 +24,15 @@ The owner runs this on their own PC and network, and accessibility is not a conc
 | `crates/olympus/src/theme.rs` | Colour tokens, in OKLCH. Use these, never raw colours |
 | `crates/olympus/src/hotkeys.rs` | Global Shift+V and Shift+C: low-level keyboard hook and a pure, tested `Machine` |
 | `crates/olympus/src/voice.rs`, `pill.rs` | Dictation (cpal, whisper-rs on Vulkan) and its floating pill |
+| `crates/olympus/src/jarvis.rs`, `speech.rs` | Shift+B: what you say becomes a read-only turn, then speech (SAPI), notes and tasks |
 | `crates/olympus/src/capture.rs` | Screenshot overlay with pencil and its toolbar (pure `Shot` and `Toolbar` logic, GDI drawing), clipboard files, attachments |
 | `crates/olympus/src/notify.rs` | Finish chime and Windows notifications |
 | `crates/olympus/src/update.rs`, `gui/splash.rs` | Installer, uninstaller, self-update, and the launch animation |
 | `crates/olympus/src/schedule.rs`, `telegram.rs` | Saved timetables (pure `is_due`), and the Telegram bot with pairing and voice memo decoding |
+| `crates/olympus/src/sync.rs` | Chats across PCs: the `Store` trait (folder and rclone), encryption, and `Syncer::cycle`. A new kind of storage only implements `Store` |
+| `crates/olympus/src/mirror.rs`, `assets/mirror/`, `gui/mirror_view.rs` | Phone access: the LAN server, pairing (`Door`), the web page, and the bottom-left switch. All state goes through `AppEvent::Mirror` to the interface thread |
+| `crates/olympus/src/obiview.rs`, `app_list.rs`, `gui/obi_view.rs`, `assets/mirror/obi.js` | The pinned Jarvis thread, what it writes to the vault, the Apps page's list and icons, its screen and its phone page |
+| `crates/olympus-obi` | `vault.rs` (Markdown, links, search), `graph.rs` (force layout), `capture.rs` (UI Automation reader), `files.rs` (saved files, from `ReadDirectoryChangesW`), `store.rs` (`obiview.db`) |
 | `crates/olympus-core/src/agent.rs`, `claude.rs`, `codex.rs`, `openai.rs`, `node.rs` | One turn on each provider |
 | `crates/olympus-core/src/runtime.rs`, `target.rs`, `limits.rs`, `discovery.rs` | Routing, model targets, quotas, finding CLIs, accounts and past sessions |
 | `crates/olympus-core/src/workflow.rs`, `git.rs`, `roles.rs` | `/auto`, `/council`, `/review` |
@@ -37,11 +42,11 @@ The owner runs this on their own PC and network, and accessibility is not a conc
 | `crates/olympus-node` | LAN server, downloads, model store, console |
 | `vendor/infr` | Vendored pure-Rust inference engine used by the node |
 
-Adding a slash command takes one row in `COMMANDS` and one arm in `run`, both in `commands.rs`. It then shows up in `/help`, the `/` list and the palette, and `every_command_has_a_handler` guards it. A sidebar button is one `control(...)` in `gui/chrome.rs` that calls `root.run_command`.
+Adding a slash command takes one row in `COMMANDS` and one arm in `run`, both in `commands.rs`. It then shows up in `/help`, the `/` list and the palette, and `every_command_has_a_handler` guards it. A sidebar button is one `icon_control(...)` in `gui/chrome.rs` that calls `root.run_command`, with its SVG added to `Assets` in `gui/mod.rs`.
 
 ## The owner's data
 
-Everything is in `~/.olympus`: `config.toml` (settings), `sessions/` (saved threads), `schedules.json`, `telegram.json` (holds the bot's token), `skill-drafts/`, `last.json`, `learn.db`, `usage.json`, `oa-sessions/`, `attachments/` (deleted after 7 days), `models/whisper/`, `wt/` (worktrees), `tools/` (build tools), `crash.log` (written after a crash).
+Everything is in `~/.olympus`: `config.toml` (settings), `sessions/` (saved threads), `schedules.json`, `telegram.json` (holds the bot's token), `sync.json` (holds the sync code), `sync-state.json`, `skill-drafts/`, `last.json`, `learn.db`, `usage.json`, `oa-sessions/`, `mirror-on` and `mirror.json` (paired devices, as hashes), `obiview.json`, `obiview.db` (what Obiview read), `obi-icons/`, `vault/`, `obiview-chat/`, `attachments/` (deleted after 7 days), `models/whisper/`, `wt/` (worktrees), `tools/` (build tools), `crash.log` (written after a crash).
 
 When the owner reports a bug, look here first. Don't change or delete their data unless they ask. Claude's history is in `~/.claude/projects`, and earlier Olympus sessions from this folder can be read there.
 
@@ -92,7 +97,7 @@ cargo test -p olympus-core --test live -- --ignored
 - Drive it with `PostMessage` to its own window handle (`WM_CHAR`, `WM_KEYDOWN`, `WM_LBUTTONDOWN`), like `e2e.rs`.
 - Close it yourself afterwards. Only close processes you started, and check the start time and folder to be sure. Don't pipe a test script through `Select-Object -First`, because that skips its cleanup.
 
-**Never send fake global input** (`SendInput`, `keybd_event`, or moving the real cursor). This is the owner's live desktop, and it types into whatever they're doing. Physical Shift+V and Shift+C can't be tested from here, so say so and ask the owner to press them.
+**Never send fake global input** (`SendInput`, `keybd_event`, or moving the real cursor). This is the owner's live desktop, and it types into whatever they're doing. Physical Shift+V, Shift+B and Shift+C can't be tested from here, so say so and ask the owner to press them.
 
 ## Things that look wrong but aren't
 
@@ -108,7 +113,16 @@ cargo test -p olympus-core --test live -- --ignored
 - `codex` on `PATH` can be much older than the desktop app's copy in `%LOCALAPPDATA%\OpenAI\Codex\bin`, which is the one discovery prefers. Test Codex behaviour with that one.
 - Telegram request errors contain the address, and the address contains the token, so `telegram.rs` never passes them on.
 - `learn.db`'s schema version rises with new migrations, and an older Olympus refuses a newer file. So going back to an older build disables its learning store.
+- Sync's worker never writes saved chats. It returns them, and the interface saves them before the next round, so `sync_done` applying results before returning the worker matters. `Syncer` compares file hashes, so a saved chat must be byte-for-byte `serde_json::to_string(&state)`.
+- A store's record can arrive before its transcript, because cloud apps upload files in any order. That round leaves the record unread and looks again.
 - Sending a picture to a node returned an empty reply. Node vision doesn't work yet.
+- Jarvis turns and `/obiview summaries` are `Access::ReadOnly` on purpose, and Olympus writes their notes after `knowledge_rel` checks the title. What they read includes strangers' mail, which can carry prompt injection. Don't give them full access to let them write.
+- `jarvis::decide` never hands the model's wording to a full-access thread by itself. A task runs on the owner's own spoken words, or on the model's wording only after it's been said aloud and the owner said yes. What Jarvis reads can contain prompt injection, so don't shortcut this.
+- The Obiview chat is saved in `obiview-chat/`, not `sessions/`, so sync never copies captured text to other PCs.
+- The phone page gets its transcript from `block_parts`, the same as the desktop, and its colors from `theme::css()`. Change those rather than restyling one side.
+- Obiview is pinned by `obiview::start`, called from the GUI rather than `App::new`, so unit tests keep their usual window indexes. It shifts sidebar rows down by 57px, which is why `e2e.rs` clicks where it does.
+- A minimized Chromium window's accessibility text freezes until it's shown again, so a hidden chat isn't re-read. A live test of a changing page behind other windows is unreliable on this desktop, because the owner's own windows can cover or minimize it.
+- While testing the observer, walk only windows you started, with `OLYMPUS_OBI_ONLY_PIDS` on a test window or `Settings.only_pids` in a test. Never print or store what's in the owner's real windows.
 
 ## How the owner works
 

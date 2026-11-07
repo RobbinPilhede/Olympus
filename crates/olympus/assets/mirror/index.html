@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Olympus">
+<title>Olympus</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon/olympus.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/theme.css">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="pair" class="pair" hidden>
+  <form id="pair-form" class="pair-card">
+    <span class="mark logo big"></span>
+    <h1>OLYMPUS</h1>
+    <p>On your PC, turn on Phone access at the bottom left and enter the code it shows.</p>
+    <label for="pair-code">Pairing code</label>
+    <input id="pair-code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="8" required>
+    <p id="pair-error" class="error-text" role="alert" hidden></p>
+    <button class="primary" type="submit">Pair this device</button>
+  </form>
+</div>
+<div id="app" class="app" hidden>
+  <header class="titlebar">
+    <button id="menu" class="control menu" aria-label="Threads" aria-expanded="false"><span class="burger"></span></button>
+    <span class="mark logo"></span><strong class="brand">OLYMPUS</strong>
+    <span id="position" class="position"></span>
+    <span id="place" class="place"></span>
+    <span id="link" class="link-state" hidden></span>
+    <button id="changes" class="control">Changes</button>
+  </header>
+  <div class="body">
+    <div id="scrim" class="drawer-scrim" hidden></div>
+    <aside id="sidebar" class="sidebar">
+      <div id="obi-row"></div>
+      <div class="side-head"><span>Threads</span><button id="new-chat" class="control accent">+ New</button></div>
+      <nav id="threads" class="threads" aria-label="Threads"></nav>
+      <div class="side-foot">
+        <div id="connected" class="connected"></div>
+        <button class="control dim" data-run="/term">Terminal</button>
+        <button class="control dim" data-run="/sessions">Past sessions</button>
+        <button class="control dim" data-run="/nodes">Network models</button>
+        <button id="palette" class="control dim">Find anything</button>
+        <button class="control dim" data-run="/self-improve">Self-improve</button>
+      </div>
+    </aside>
+    <main class="main">
+      <section id="obi" class="obi" hidden></section>
+      <section id="transcript" class="transcript" aria-live="polite"></section>
+      <button id="latest" class="control accent latest" hidden>↓ Latest</button>
+      <section id="term" class="term" hidden>
+        <div id="term-screen" class="term-screen"></div>
+        <div class="term-keys">
+          <button data-key="esc">Esc</button><button data-key="tab">Tab</button><button data-key="ctrl-c">Ctrl+C</button><button data-key="up">↑</button><button data-key="down">↓</button><button data-key="left">←</button><button data-key="right">→</button><button data-scroll="15">PgUp</button><button data-scroll="-15">PgDn</button>
+        </div>
+        <form id="term-form" class="term-line">
+          <input id="term-input" aria-label="Type into the terminal" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="Type a line and press Enter">
+          <button class="primary" type="submit">Send</button>
+        </form>
+      </section>
+      <div id="composer-wrap" class="composer-wrap">
+        <div id="hints" class="hints" hidden></div>
+        <form id="composer" class="composer">
+          <div id="scan" class="scan" hidden><i></i></div>
+          <div id="attachments" class="attachments" hidden></div>
+          <textarea id="input" rows="1" aria-label="Message" placeholder="Message, /command or @model"></textarea>
+          <div class="composer-row">
+            <button type="button" id="attach" class="control dim" aria-label="Attach a file">Attach</button>
+            <input type="file" id="file" multiple hidden>
+            <button type="button" id="model" class="control accent"></button>
+            <button type="button" id="account" class="control dim wide-only"></button>
+            <button type="button" id="profile" class="control dim wide-only"></button>
+            <span id="bypass" class="bypass wide-only">bypass on</span>
+            <span class="grow"></span>
+            <button type="button" id="stop" class="control outlined" hidden>Stop</button>
+            <button type="submit" id="send" class="primary">Send</button>
+          </div>
+        </form>
+      </div>
+    </main>
+  </div>
+  <footer class="footer">
+    <span id="hints-line" class="foot-hints">Enter send · Shift+Enter new line · / commands</span>
+    <span id="foot-right" class="foot-right"></span>
+  </footer>
+</div>
+<div id="picker" class="picker-scrim" hidden>
+  <div class="picker" role="dialog" aria-modal="true" aria-labelledby="picker-title">
+    <div class="picker-head"><span class="prompt">›</span><input id="picker-query" aria-label="Filter" placeholder="Type to filter" autocomplete="off" spellcheck="false"><span id="picker-title" class="picker-title"></span></div>
+    <div id="picker-rows" class="picker-rows"></div>
+    <div class="picker-foot"><span id="picker-count"></span><button id="picker-close" class="control dim">Close</button></div>
+  </div>
+</div>
+<div id="review" class="review" hidden>
+  <header class="review-head"><strong>Changes</strong><span id="review-sum" class="dim-text"></span><span class="grow"></span><button id="review-close" class="control dim">Close</button></header>
+  <div id="review-body" class="review-body"></div>
+</div>
+<div id="toast" class="toast" role="status" hidden></div>
+<script src="/obi.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

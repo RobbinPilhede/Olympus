@@ -33,19 +33,19 @@ fn color(value: vt100::Color, fallback: Hsla) -> Hsla {
 
 /// One stretch of same-looking cells to draw at a column.
 #[derive(Debug, PartialEq)]
-struct CellRun {
-    column: u16,
-    width: u16,
-    text: String,
-    fg: Hsla,
-    bg: Option<Hsla>,
-    bold: bool,
-    italic: bool,
-    underline: bool,
+pub struct CellRun {
+    pub column: u16,
+    pub width: u16,
+    pub text: String,
+    pub fg: Hsla,
+    pub bg: Option<Hsla>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
 }
 
 // Non-ASCII glyphs can fall back to fonts of another width, so each gets its own run to stay on the grid.
-fn row_runs(screen: &vt100::Screen, row: u16, cols: u16, cursor: Option<u16>) -> Vec<CellRun> {
+pub fn row_runs(screen: &vt100::Screen, row: u16, cols: u16, cursor: Option<u16>) -> Vec<CellRun> {
     let mut runs: Vec<CellRun> = Vec::new();
     for column in 0..cols {
         let Some(cell) = screen.cell(row, column) else { continue };

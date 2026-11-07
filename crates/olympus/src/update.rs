@@ -109,7 +109,7 @@ fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
 }
 
 // Test windows use a temporary profile, and must never touch the real registry or Desktop.
-fn in_real_profile() -> bool {
+pub fn in_real_profile() -> bool {
     known_folder(&windows::Win32::UI::Shell::FOLDERID_Profile).is_some_and(|real| real == user_home())
 }
 

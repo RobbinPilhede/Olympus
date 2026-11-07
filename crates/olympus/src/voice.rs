@@ -16,7 +16,7 @@ const SHORTEST_SPEECH: Duration = Duration::from_millis(300);
 const SILENCE_RMS: f32 = 0.002;
 
 enum Command {
-    Start { locked: bool },
+    Start { locked: bool, for_jarvis: bool },
     Stop,
     Clip { audio: Vec<f32>, reply: tokio::sync::oneshot::Sender<Result<String, String>> },
 }
@@ -25,12 +25,23 @@ enum Command {
 #[derive(Clone)]
 pub struct Voice {
     commands: Sender<Command>,
+    pill: Pill,
 }
 
 impl Voice {
     /// Starts recording; locked means nothing has to stay held down.
     pub fn start(&self, locked: bool) {
-        let _ = self.commands.send(Command::Start { locked });
+        let _ = self.commands.send(Command::Start { locked, for_jarvis: false });
+    }
+
+    /// Starts recording what you say to Jarvis, who gets it instead of the app you're in.
+    pub fn start_for_jarvis(&self, locked: bool) {
+        let _ = self.commands.send(Command::Start { locked, for_jarvis: true });
+    }
+
+    /// The status pill, for showing what Jarvis is doing.
+    pub fn pill(&self) -> &Pill {
+        &self.pill
     }
 
     /// Stops recording and transcribes.
@@ -208,9 +219,10 @@ fn start_recording(pill: &Pill) -> Result<Recording, String> {
 }
 
 /// Starts the voice worker, loading the model in the background so the first hold is fast.
-pub fn spawn() -> Voice {
+pub fn spawn(tx: tokio::sync::mpsc::UnboundedSender<crate::app::AppEvent>) -> Voice {
     let (commands, inbox) = channel();
     let pill = pill::spawn();
+    let shown = pill.clone();
     let engine: Arc<Mutex<Option<WhisperContext>>> = Arc::default();
     let warm = engine.clone();
     std::thread::spawn(move || {
@@ -225,18 +237,28 @@ pub fn spawn() -> Voice {
         let mut recording = None;
         while let Ok(command) = inbox.recv() {
             match command {
-                Command::Start { locked } => match start_recording(&pill) {
+                Command::Start { locked, for_jarvis } => match start_recording(&pill) {
                     Ok(started) => {
                         crate::notify::tick(true);
                         pill.show_listening(locked);
-                        recording = Some(started);
+                        recording = Some((started, for_jarvis));
                     }
                     Err(message) => pill.show_message(&message),
                 },
                 Command::Stop => {
-                    let Some(finished) = recording.take() else { continue };
+                    let Some((finished, for_jarvis)) = recording.take() else { continue };
                     crate::notify::tick(false);
-                    finish(finished, &engine, &pill);
+                    match finish(finished, &engine, &pill) {
+                        Some(text) if for_jarvis => {
+                            pill.show_status("Jarvis is thinking");
+                            let _ = tx.send(crate::app::AppEvent::JarvisHeard(text));
+                        }
+                        Some(text) => {
+                            pill.hide();
+                            type_text(&text);
+                        }
+                        None => {}
+                    }
                 }
                 Command::Clip { audio, reply } => {
                     let _ = reply.send(transcribe_clip(&audio, &engine));
@@ -244,7 +266,7 @@ pub fn spawn() -> Voice {
             }
         }
     });
-    Voice { commands }
+    Voice { commands, pill: shown }
 }
 
 fn transcribe_clip(audio: &[f32], engine: &Mutex<Option<WhisperContext>>) -> Result<String, String> {
@@ -267,23 +289,24 @@ fn transcribe_clip(audio: &[f32], engine: &Mutex<Option<WhisperContext>>) -> Res
     Ok(text)
 }
 
-fn finish(finished: Recording, engine: &Mutex<Option<WhisperContext>>, pill: &Pill) {
+// What was said, or None once the pill has already said why there's nothing.
+fn finish(finished: Recording, engine: &Mutex<Option<WhisperContext>>, pill: &Pill) -> Option<String> {
     let Recording { _stream, samples, channels, rate, started } = finished;
     drop(_stream);
     let audio = samples.lock().map(|samples| to_whisper_audio(&samples, channels, rate)).unwrap_or_default();
     if started.elapsed() < SHORTEST_SPEECH || rms(&audio) < SILENCE_RMS {
         pill.hide();
-        return;
+        return None;
     }
     pill.show_working();
-    let Ok(mut slot) = engine.lock() else { return };
+    let Ok(mut slot) = engine.lock() else { return None };
     if slot.is_none() {
         let path = model_path();
         if !path.exists() {
             pill.show_downloading();
             if !download_model(&path) {
                 pill.show_message("Unable to download the voice model");
-                return;
+                return None;
             }
         }
         pill.show_working();
@@ -291,14 +314,15 @@ fn finish(finished: Recording, engine: &Mutex<Option<WhisperContext>>, pill: &Pi
     }
     let Some(loaded) = slot.as_ref() else {
         pill.show_message("Unable to load the voice model");
-        return;
+        return None;
     };
     let text = transcribe(loaded, &audio).map(|text| clean_transcript(&text)).unwrap_or_default();
     drop(slot);
-    pill.hide();
-    if !text.is_empty() {
-        type_text(&text);
+    if text.is_empty() {
+        pill.hide();
+        return None;
     }
+    Some(text)
 }
 
 #[cfg(test)]

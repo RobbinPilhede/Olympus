@@ -68,6 +68,11 @@ impl Pill {
         set_look(Look::Text(text.to_string()), true);
     }
 
+    /// Shows a status that stays until something replaces it.
+    pub fn show_status(&self, text: &str) {
+        set_look(Look::Text(text.to_string()), false);
+    }
+
     /// Hides the pill.
     pub fn hide(&self) {
         post(HIDE, 0);

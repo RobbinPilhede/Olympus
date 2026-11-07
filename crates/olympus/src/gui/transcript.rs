@@ -90,6 +90,10 @@ impl Root {
     }
 
     fn open_link(&mut self, window: u64, target: &str) {
+        if crate::obiview::is_vault_link(target) {
+            crate::obiview::follow_link(&mut self.app, target);
+            return;
+        }
         let cwd = self.app.windows.iter().find(|w| w.id == window).and_then(|w| if let Pane::Chat(chat) = &w.pane { Some(chat.state.cwd.clone()) } else { None }).unwrap_or_default();
         let resolved = link_target(target, &cwd);
         if !open_with_windows(&resolved) {
@@ -158,7 +162,7 @@ impl Root {
         div().flex_none().text_color(color).child(glyph).into_any_element()
     }
 
-    fn part_el(&self, window: u64, block: usize, index: usize, part: &Part, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn part_el(&self, window: u64, block: usize, index: usize, part: &Part, cx: &mut Context<Self>) -> AnyElement {
         let text = self.rich_el(window, block, index, part, cx);
         match &part.kind {
             PartKind::Picture { path, width, height } => {
@@ -341,6 +345,9 @@ impl Root {
     }
 
     fn empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.app.obiview_active() {
+            return div().p(px(18.)).text_color(theme::dim()).child("Ask Jarvis what's going on, what came in, or what's in your notes.").into_any_element();
+        }
         let providers = self.app.provider_lines.iter().map(|(label, ready)| {
             div()
                 .flex()
