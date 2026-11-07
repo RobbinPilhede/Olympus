@@ -90,6 +90,7 @@ cargo test -p olympus-core --test live -- --ignored
 - The test command opens and closes real Olympus windows, so don't conclude from a passing build. Keep clippy clean and all tests passing.
 - `live` uses the real signed-in CLIs on the cheapest models and spends a little quota. Run it only when provider code changed.
 - Prefer pure functions with unit tests, as `hotkeys::Machine` and `commands::parse_loop` do. `crates/olympus/tests/e2e.rs` shows how to drive a real window.
+- README pictures in `docs/images` are staged: a made-up profile under `C:\ot\demo` with stand-in `claude.exe` and `codex.exe`, `OLYMPUS_OBI_ONLY_PIDS` on a process that doesn't exist, and Phone access off on the desktop. Ordinary test captures show your username in the title bar, your LAN address beside the switch and your real apps on the Apps tab, so never publish those.
 - Anything visible needs a look at a real capture. The global rules require the `better-interface` review, with accessibility left out.
 
 **Running a test window:**

@@ -6,18 +6,20 @@
 
 **Every model you're signed into, working as one team.**
 
-A fast, keyboard-first desktop app for Windows, written in Rust. It runs your signed-in Claude Code and Codex side by side, adds OpenRouter and models on your own network, and learns from your history.
+A fast, keyboard-first desktop app for Windows, written in Rust. It runs your signed-in Claude Code and Codex side by side, adds OpenRouter and models on your own network, remembers how you work, and reads what's on your screen when you ask it to.
 
 [![Release](https://img.shields.io/github/v/release/RobbinPilhede/Olympus?color=white&labelColor=black)](https://github.com/RobbinPilhede/Olympus/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-white?labelColor=black)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%20x64-white?labelColor=black)](#get-started)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-white?labelColor=black)](https://www.rust-lang.org)
 
-[Get started](#get-started) · [What it does](#what-it-does) · [Commands](#commands) · [Safety](#safety-and-secrets) · [Build from source](#build-from-source)
+[Get started](#get-started) · [What it does](#what-it-does) · [Obiview](#obiview-your-jarvis) · [Memory](#it-remembers-you) · [Phone](#open-it-on-your-phone) · [Commands](#commands) · [Safety](#safety-and-secrets) · [Build from source](#build-from-source)
 
 <br>
 
-<img src="docs/images/welcome.png" alt="The Olympus window: a thread list on the left, each thread showing its account and model, and the welcome screen with suggested commands" width="860">
+<img src="docs/images/chat.png" alt="The Olympus window: threads on Claude, ChatGPT and OpenRouter on the left, and a chat where Claude fixes a bug, asks ChatGPT for a second opinion and remembers a preference" width="860">
+
+<sub>The pictures in this README use made-up accounts, chats and notes.</sub>
 
 </div>
 
@@ -41,6 +43,7 @@ If you pay for more than one AI coding tool, you end up juggling terminals, acco
 
 1. Download [`OlympusSetup.exe`](https://github.com/RobbinPilhede/Olympus/releases/latest/download/OlympusSetup.exe) and run it. It takes one click, needs no admin rights, and adds Olympus to your Start menu and Desktop. The builds aren't code-signed yet, so Windows may show a SmartScreen warning.
 2. Press **+ New**, pick an account, pick a folder, and start typing.
+3. Optional: run `/account add openrouter <key>` for pay-per-use models, flip **Phone access** to use it from your phone, or turn on **Obiview** and choose which apps it may read.
 
 **Updates are automatic.** Each time you open Olympus, it plays a short animation while it checks for a new version. If there is one, it downloads it, verifies its checksum, swaps it in and reopens, and you can skip it while it downloads. If you're offline, it just opens. Anything already running keeps working on the old copy until you close it.
 
@@ -56,9 +59,17 @@ If you pay for more than one AI coding tool, you end up juggling terminals, acco
 **+ New** asks which account to use, then where to work: your user folder, any folder you browse to, or a recent one.
 
 <p>
-  <img src="docs/images/accounts.png" alt="Account picker listing two Claude accounts and a ChatGPT account, with options to sign in to more" width="49%">
+  <img src="docs/images/accounts.png" alt="Account picker listing two Claude accounts, a ChatGPT account and OpenRouter, with options to sign in to more" width="49%">
   <img src="docs/images/folders.png" alt="Folder picker listing the user folder, a choose-a-folder option, and recent folders" width="49%">
 </p>
+
+### Add OpenRouter
+
+Paste a key from [openrouter.ai/keys](https://openrouter.ai/keys) with `/account add openrouter <key>`, or choose **Add an OpenRouter key** in `/account`. Olympus checks it with OpenRouter, saves it in `~/.olympus/config.toml`, and lists every model with its price. Type to filter, such as `free`.
+
+<img src="docs/images/openrouter-models.png" alt="A filterable list of OpenRouter models, each with its price per million tokens and context size" width="640">
+
+It's billed per use from your OpenRouter credits, and only threads you put on it use it. Auto mode won't choose it unless you add it to your model tiers, and Jarvis and memory stay on your subscriptions. `/model openrouter` changes the model, and `/account remove openrouter` deletes the key.
 
 ### Make the models work together
 
@@ -79,26 +90,53 @@ flowchart LR
     O --> N[olympus-node on your LAN]
     C <-->|model bridge| X
     O <--> L[(learn.db: lessons and routing)]
+    O <--> M[(memory.md: what it knows about you)]
+    O <--> V[(Vault: your notes and what Obiview reads)]
 ```
 
 ### Obiview, your Jarvis
 
-Obiview is the thread pinned at the top of the list, with the Jarvis mark. It has three parts:
+Obiview is the thread pinned at the top of the list, with the Jarvis mark. It's off until you flip its switch.
+
+<img src="docs/images/obiview-today.png" alt="Obiview's Today page: what it's reading, a timeline of your day, and Jarvis answering what came in this morning" width="860">
+
+It has four parts:
 
 - **A vault of plain Markdown** in `~/.olympus/vault`, which you can also open in Obsidian. It has `[[links]]`, `#tags`, properties, backlinks, unlinked mentions, daily notes, search with `tag:`, `file:`, `path:`, `[property]`, `-not` and `"phrases"`, and a graph you can pan, zoom and drag. `Alt+K` finds any note.
 - **A reader.** Flip the switch on the thread and it reads the text of the apps on your screen through Windows UI Automation, like Teams, Outlook, your browser, editors and terminals, and notes which programs start and stop. It needs no accounts, passwords or API keys, and it writes what came in and what you did into each day's note, with a note per app in `Sources/`. It only sees what those apps show, so mail you never open isn't read. While you're away from the PC it looks every 5 minutes instead of every few seconds.
 - **Talk to Jarvis.** Hold **Shift+B** and speak, or press it twice to keep listening until you press it again. Jarvis answers out loud in Windows' own voice, writes notes when you ask, and does things on your computer. A task from your own words starts straight away. A task based on something it read, like an email, is said out loud first and waits for your yes, so a planted instruction can't run by itself. `/talk <words>` does the same by typing.
 - **Jarvis in text.** Ask in the thread, or from any thread with `/jarvis what came in this morning?`. Models in other threads can also look things up themselves when you ask them what's going on.
 
+<p>
+  <img src="docs/images/obiview-graph.png" alt="The graph of how notes, tags and sources link together" width="49%">
+  <img src="docs/images/obiview-note.png" alt="A note with links, tags, a checklist and the notes that link to it" width="49%">
+</p>
+
 Each day's note says how long you spent in each program and what you had open, which files you saved and which app was in front at the time, the Git commits in those folders, and new text that appeared on screen. Saved files are noticed in your home folder, leaving out hidden folders, `AppData` and build output. It's all written on your PC.
 
 It skips password fields, password managers, private browsing, banks and windows that ask not to be captured, and files saved while one of those is in front. It only reads what apps show. A minimized browser, Discord or Teams window stops updating until you open it again, so new messages in one may not be noticed until then.
+
+<img src="docs/images/obiview-apps.png" alt="The Apps tab: switches for what to read, and a list of apps each set to Read, Time only or Off" width="860">
 
 **Choose what it reads on the Apps tab** (`/obiview apps`). It lists your installed and open apps with their icons. **Every app starts off**, and each can be set to **Read**, **Time only** (how long and the window titles, no text) or **Off**. To read everything but a few, choose "Every app except those I turn off". Sites inside your browser have their own list, and you can turn off text, windows behind the front one, saved files and program tracking separately. `/obiview exclude <word>` skips any window with that word in its title, and `/obiview include <word>` undoes it. Raw text is deleted after 14 days. Daily notes and summaries stay.
 
 Jarvis tidies your notes by itself. Once you've chosen an app, Haiku rewrites today's summary every 15 minutes and files lasting facts under `Knowledge/`. It adds to your notes and never rewrites what you wrote. `/obiview summaries off` stops it. Summaries and Jarvis run on your connected Claude or ChatGPT subscription and never use API credits or OpenRouter. Mail, chats and meetings stay out of those unless you add `messages`, as in `/obiview summaries haiku messages`. Asking Jarvis something still sends it what was read, including messages.
 
+### It remembers you
+
+<img src="docs/images/memory.png" alt="The /memory command listing what Olympus has learned, under About you and How to work with you" width="860">
+
+Olympus keeps a small file about you, `~/.olympus/memory.md`, with two parts: **About you** and **How to work with you**. New sessions load it (up to 4,000 characters, about 1,000 tokens), and Jarvis uses it too.
+
+After a task finishes, your cheapest Claude or ChatGPT model reads what you typed or said since the last review and updates the file by itself. It adds new facts and replaces outdated ones, then shows what changed in that thread. Each review is one small turn on your subscription, and it's skipped when you've only said a few words.
+
+- **What it learns from:** only your own messages. It doesn't read the model's replies, messages over 2,000 characters (usually pastes), or what Obiview read, so a planted instruction in a mail or web page has no direct way in. Text you paste into a shorter message can still reach it. The review is told not to store that, and lines that read like orders, or hold links or keys, are refused.
+- **Where it goes:** threads on OpenRouter don't get it, because OpenRouter passes prompts to outside companies. The file isn't synced to your other PCs.
+- **You're in charge:** `/memory` shows it, `/memory forget <words>` removes entries, and `/memory off` stops both loading and learning. You can edit the file by hand, and anything that isn't an entry stays as you wrote it.
+
 ### Open it on your phone
+
+<img src="docs/images/phone.png" alt="Three phone screens: the thread list, a chat, and Jarvis answering a question" width="700">
 
 Flip **Phone access** at the bottom left, then scan the code it shows. Olympus opens in your phone's browser, drawn from the same state as the window: your threads, live replies, commands, model pickers, changes, terminals, Obiview and the graph. Add it to your home screen to use it like an app. It works in any browser on the same network, and the switch stays how you left it across restarts.
 
@@ -156,16 +194,6 @@ Hold **Shift+V** to dictate into whatever app you're using. It runs on your GPU,
 - **Tiers and routing.** `/auto` tasks and `/model auto` chats start on the cheapest tier that fits. Failed checks escalate to a stronger model.
 - **Failover.** When a vendor hits its limit, work continues on the other with a short handoff.
 - **Bounded memory.** At most 400 tokens of lessons per session, and 20% of runs get none so the benefit can be measured.
-
-### Memory
-
-Olympus keeps a small file about you, `~/.olympus/memory.md`, with two parts: **About you** and **How to work with you**. New sessions load it (up to 4,000 characters, about 1,000 tokens), and Jarvis uses it too.
-
-After a task finishes, your cheapest Claude or ChatGPT model reads what you typed or said since the last review and updates the file by itself. It adds new facts and replaces outdated ones, then shows what changed in that thread. Each review is one small turn on your subscription, and it's skipped when you've only said a few words.
-
-- **What it learns from:** only your own messages. It doesn't read the model's replies, messages over 2,000 characters (usually pastes), or what Obiview read, so a planted instruction in a mail or web page has no direct way in. Text you paste into a shorter message can still reach it. The review is told not to store that, and lines that read like orders, or hold links or keys, are refused.
-- **Where it goes:** threads on OpenRouter don't get it, because OpenRouter passes prompts to outside companies. The file isn't synced to your other PCs.
-- **You're in charge:** `/memory` shows it, `/memory forget <words>` removes entries, and `/memory off` stops both loading and learning. You can edit the file by hand, and anything that isn't an entry stays as you wrote it.
 
 ### Learn from your history
 
@@ -262,7 +290,7 @@ Everything is reachable from `Alt+K`.
 
 Settings live in `~/.olympus/config.toml`, which is created on first run. It holds your model tiers, node addresses, parallel agent limit and quota ceiling.
 
-Keys are never stored in this repo or in the app. Set them in your environment:
+Keys are never stored in this repo. Set them in your environment:
 
 | Variable | Used for |
 | --- | --- |
@@ -272,7 +300,7 @@ Keys are never stored in this repo or in the app. Set them in your environment:
 | `OLYMPUS_MIRROR_PORT` | The port for phone access, instead of 47480 |
 | `OLYMPUS_TELEGRAM_TOKEN` | Your Telegram bot's token, instead of the one `/telegram connect` saves in `~/.olympus/telegram.json` |
 
-Your data stays in `~/.olympus`: settings, saved threads, `memory.md`, `learn.db`, usage and attachments.
+Your data stays in `~/.olympus`: settings, saved threads, `memory.md`, your vault, what Obiview read, `learn.db`, paired devices, usage and attachments. A key added with `/account add openrouter` is saved in `config.toml` as plain text, readable by anything running as you.
 
 ## Safety and secrets
 
@@ -284,6 +312,7 @@ Your data stays in `~/.olympus`: settings, saved threads, `memory.md`, `learn.db
 - **Change the node token.** A node accepts the default token `olympus` unless you set `OLYMPUS_NODE_TOKEN`. Its firewall rule only allows your local subnet, but anyone on that network who knows the default can use the node.
 - **A paired phone can run commands on your PC.** Phone access refuses addresses outside your own network, needs a one-time code to pair, and only allows your local subnet through Windows Firewall. The connection is plain HTTP, though, so anyone able to watch your network can read it and copy the device's key. Use it on a network you trust. `/mirror forget` unpairs everything if you lose your phone.
 - **Obiview reads a lot, including other people's words.** What it reads stays in `~/.olympus/obiview.db` unencrypted, readable by anything running as you. Reading work mail and chats may be against your employer's rules, so check first. When you ask Jarvis or turn on summaries, what it read goes to that model's provider. Mail can also contain text written to trick an AI, so Jarvis and summaries run read-only and Olympus writes their notes itself. Agents in your other threads have full access and can look this text up when you ask them to. They're told to treat it as information only, but that's a warning, not a wall.
+- **Memory is sent with your chats.** Every new session on Claude, ChatGPT or a node gets `memory.md`, so keep secrets out of it. It's a plain file that anything running as you can read or change, and whatever it says shapes every later session. Check it now and then with `/memory`.
 - **Your Telegram account can run commands on your PC** once it's linked. Keep your bot token private, and use `/telegram off` if you lose your phone.
 - **Your sync code opens all your synced chats,** which often contain secrets from your work. It's saved in `~/.olympus/sync.json`. Anyone with both the code and your storage could read your chats, or add a chat that misleads an agent you then continue it with. If it leaks, run `/sync off`, delete the storage folder, and connect again to get a new code.
 - **Global hotkeys.** Shift+V, Shift+B and Shift+C use a low-level keyboard hook. `/hotkeys off` turns it off.
@@ -320,6 +349,7 @@ cargo test -p olympus-core --test live -- --ignored # uses your signed-in CLIs a
 | `crates/olympus` | The desktop interface |
 | `crates/olympus-core` | Providers, workflows, the MCP bridge |
 | `crates/olympus-learn` | History ingest, lessons, routing |
+| `crates/olympus-obi` | Obiview: the Markdown vault, the graph, the screen reader and its store |
 | `crates/olympus-node` | The LAN model server |
 | `vendor/infr` | The pure-Rust inference engine ([infr](https://github.com/kryptic-sh/infr), MIT), embedded in the node |
 
